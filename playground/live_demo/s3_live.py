@@ -19,6 +19,7 @@ S3 요청 폭증(스크래핑/과도한 다운로드) 시나리오 실시간 데
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -40,7 +41,28 @@ SOURCE_FILE = (
 )
 
 
-def main() -> None:
+def _resource_id() -> str:
+    data = json.load(open(SOURCE_FILE, encoding="utf-8"))
+    return data["anomaly_trials"][0]["after"]["resource_id"]
+
+
+def teardown() -> None:
+    resource_id = _resource_id()
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    try:
+        objs = s3.list_objects_v2(Bucket=resource_id).get("Contents", [])
+        if objs:
+            s3.delete_objects(
+                Bucket=resource_id,
+                Delete={"Objects": [{"Key": o["Key"]} for o in objs]},
+            )
+        s3.delete_bucket(Bucket=resource_id)
+        print(f"[s3_live] 버킷 삭제 완료: {resource_id}")
+    except Exception as exc:
+        print(f"[s3_live] 버킷 삭제 실패(이미 없을 수 있음): {exc}")
+
+
+def run() -> None:
     data = json.load(open(SOURCE_FILE, encoding="utf-8"))
     trial = data["anomaly_trials"][0]
     after = trial["after"]
@@ -57,6 +79,17 @@ def main() -> None:
         raw_metrics=after["raw_metrics"],
         resource_age_seconds=None,
     )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--teardown", action="store_true")
+    args = parser.parse_args()
+
+    if args.teardown:
+        teardown()
+    else:
+        run()
 
 
 if __name__ == "__main__":
