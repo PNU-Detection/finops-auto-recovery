@@ -64,6 +64,8 @@ import logging
 import os
 from datetime import datetime, timezone
 
+import boto3
+
 from config.decision_policy import get_priority_weight
 from pipeline.cost_estimator import _get_ec2_instance_type
 from pipeline.rule_engine import get_rule_engine, reload_rules
@@ -77,21 +79,15 @@ from utils.llm_utils import call_gemini
 
 logger = logging.getLogger(__name__)
 
-# [ADDED] LLM의 액션 선택 판단(pseudo_code 포함) 로그 경로.
+# LLM의 액션 선택 판단(pseudo_code 포함) 로그 경로.
 # classification_agent.py의 llm_classification_log.jsonl과 동일한 패턴 —
-# trace_id로 QA_agent가 이후 qa_result를 채워주고, decision_pseudocode_promoter.py가
-# 이 로그를 모아 반복되는 판단 패턴을 분석한다.
+#   trace_id로 QA_agent가 이후 qa_result를 채워주고, decision_pseudocode_promoter.py가
+#   이 로그를 모아 반복되는 판단 패턴을 분석한다.
 LLM_DECISION_LOG_PATH = os.path.join(
     os.path.dirname(__file__), "..", "schema", "logs", "llm_decision_log.jsonl"
 )
 
-# [ADDED] "예측 절감액 vs 실측 절감액" 사후 검증(playground/verify_cost_predictions.py)
-# 전용 로그. llm_decision_log.jsonl에도 비용 숫자가 들어있긴 하지만 decision_reasoning
-# 문자열 안에 파묻혀 있어서(예: "cost 1.07 -> 0.99 USD/hr") 파싱하기 번거롭고, 그 로그는
-# QA_agent가 used_llm=True(LLM 판단)인 경우에만 qa_result를 채워줘서 Rule Book 매칭
-# 케이스는 사후 추적이 어렵다. 여기는 action_executed 여부와 무관하게 매 결정마다
-# resource_id/current_cost_usd/estimated_saving_usd를 구조화된 필드로 그대로 남겨서,
-# 나중에 실제 CloudWatch를 재조회해 "예측이 얼마나 맞았는지" 계산할 수 있게 한다.
+# 예상 절감액을 기록해두고, 나중에 실제 비용과 비교하여 예측의 정확도를 검증하기 위한 전용 로그
 COST_PREDICTION_LOG_PATH = os.path.join(
     os.path.dirname(__file__), "..", "schema", "logs", "cost_prediction_log.jsonl"
 )
@@ -150,8 +146,7 @@ MAX_LLM_RETRIES = 2
 # EC2 Resize 시 기본 목표 인스턴스 타입 (cost 데이터가 없어 역추정이 불가능할 때만 사용)
 DEFAULT_TARGET_INSTANCE_TYPE = "t3.small"
 
-# EC2 온디맨드 시간당 단가(USD) — ap-northeast-2(서울) 리전, 2026-07 기준 근사치.
-# 가격 오름차순으로 정렬되어 있어야 "한 단계 다운사이즈" 로직이 성립한다.
+# EC2 온디맨드 시간당 단가(USD) — ap-northeast-2(서울) 리전, 2026-07 기준 근사치
 # 실제 운영에서는 AWS Pricing API로 대체해야 하는 캡스톤 스코프의 정적 참고 테이블이다.
 EC2_HOURLY_PRICE_USD: list[tuple[str, float]] = [
     ("t3.micro", 0.0104),
@@ -189,7 +184,7 @@ RULE_BASED_SCORE_TABLE: dict[str, tuple[float, float, float]] = {
     "ScaleDown": (0.6, 0.3, 0.7),
 }
 
-# [ADDED] 액션 선택을 LLM에게 맡기기 위한 boto3 공식 API 스펙 테이블.
+# 액션 선택을 LLM에게 맡기기 위한 boto3 공식 API 스펙 테이블.
 # ALLOWED_ACTIONS로 허용된 액션에 한해서만 이 스펙이 프롬프트에 포함된다.
 BOTO3_SPEC: dict[str, dict] = {
     "Stop": {
@@ -257,16 +252,8 @@ BOTO3_SPEC: dict[str, dict] = {
     },
 }
 
-# 2026-09-12 버그 수정: ALLOWED_ACTIONS(schema/state.py)가 anomaly_type만 보고
-# resource_type을 안 보다 보니, 예를 들어 Lambda(cost_spike)에도 ScaleDown/Block이
-# "허용 액션"으로 잡혀서 LLM 프롬프트에 올라갔다. ScaleDown은 Lambda용 실행 로직이
-# action_agent.py에 아예 없고(not_implemented로 빠짐), Block은 실행은 되지만
-# (동시성 0으로 처리) 위 BOTO3_SPEC["Block"]은 S3 기준으로 적혀 있어 LLM한테
-# 완전히 엉뚱한 API 설명을 보여주는 문제가 있었다.
-#
-# action_agent.py의 실제 dispatcher(execute_action)와 반드시 일치시킬 것 - 여기서
-# "구현됨"이라고 적어놓고 실제로는 action_agent.py에 없으면 not_implemented로
-# 빠지는 액션이 또 생긴다.
+# 리소스별 실제 실행 가능한 액션만 LLM이 선택하도록 허용 액션 목록을 수정하고,
+# 실행 코드와 불일치하지 않도록 맞춘 버그 수정
 RESOURCE_IMPLEMENTED_ACTIONS: dict[str, set[str]] = {
     "EC2": {
         "NoAction",
@@ -282,9 +269,7 @@ RESOURCE_IMPLEMENTED_ACTIONS: dict[str, set[str]] = {
     },  # RDS 액션 미구현 - action_agent.py 주석 "RDS는 추후 각자 확장" 참고
 }
 
-# Block처럼 액션 이름은 같아도 리소스마다 실제 동작(API)이 다른 경우의 리소스별
-# 오버라이드. 여기 없으면 BOTO3_SPEC[action](기본값, 처음 만들어질 때 기준이 된
-# 리소스 - Block은 S3)을 그대로 쓴다.
+# 같은 액션이라도 리소스별 AWS API가 다르면, 해당 리소스에 맞는 API 설명을 우선 사용하도록 한다.
 BOTO3_SPEC_BY_RESOURCE: dict[tuple[str, str], dict] = {
     ("Lambda", "Block"): {
         "api": "lambda.put_function_concurrency(FunctionName='string', ReservedConcurrentExecutions=0)",
@@ -328,11 +313,6 @@ def _clamp01(value: float) -> float:
 def _mean(values: list[float]) -> float:
     """입력: values 출력: 산술 평균, 빈 리스트면 0.0"""
     return sum(values) / len(values) if values else 0.0
-
-
-# [REMOVED] _get_llm() — GEMINI_API_KEY 하나로 ChatGoogleGenerativeAI 클라이언트를
-# 직접 만들던 함수. utils/llm_utils.call_gemini()가 GEMINI_KEY_1/2/3 순환과
-# "키가 하나도 없음"까지 전부 RuntimeError로 처리해주므로 더 이상 필요 없음.
 
 
 # ── saving_rate 결정론적 계산 (cost 시계열 기반) ─────────────────────────────
@@ -483,6 +463,78 @@ def _trend_based_partial_saving(raw_metrics: dict) -> tuple[float, float, float]
     return saving_rate, estimated_saving_usd, recent_avg
 
 
+def _edos_avoided_scaling_cost(
+    resource_id: str,
+) -> tuple[float, int, str] | None:
+    """
+    입력: resource_id (AutoScaling 그룹명)
+    출력: (avoided_cost_usd_per_hr, avoided_instances, instance_type), 조회 실패 시 None
+
+    EDoS는 ScaleDown을 실행하는 시점에 desired_capacity가 이미 낮아(공격이 Auto
+    Scaling을 실제로 유발하기 *전에* 막았으므로), _trend_based_partial_saving()의
+    "이미 발생한 비용 증가분" 기준으로는 절감액이 거의 0으로 나온다. 이 액션의 실제
+    가치는 "막지 않았다면 ASG가 MaxSize까지 늘어났을 때 발생했을 비용을 회피했다"는
+    것이므로, MaxSize와 현재 DesiredCapacity의 차이 × 인스턴스 단가로 그 가상의
+    비용을 추정한다. 실측 절감액이 아니라 가정 기반 추정치이므로 estimated_saving_usd
+    와는 절대 합산하지 않고 avoided_cost_usd로 별도 관리한다.
+    """
+    try:
+        asg = boto3.client("autoscaling")
+        resp = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[resource_id])
+        groups = resp.get("AutoScalingGroups", [])
+        if not groups:
+            return None
+        group = groups[0]
+        max_size = group.get("MaxSize", 0)
+        desired = group.get("DesiredCapacity", 0)
+        avoided_instances = max(0, max_size - desired)
+        if avoided_instances == 0:
+            return 0.0, 0, DEFAULT_TARGET_INSTANCE_TYPE
+
+        instance_type: str | None = None
+        instances = group.get("Instances", [])
+        if instances:
+            try:
+                instance_type = _get_ec2_instance_type(instances[0]["InstanceId"])
+            except Exception:
+                instance_type = None
+
+        if instance_type is None:
+            lt_spec = group.get("LaunchTemplate") or (
+                (group.get("MixedInstancesPolicy") or {})
+                .get("LaunchTemplate", {})
+                .get("LaunchTemplateSpecification")
+            )
+            if lt_spec:
+                try:
+                    ec2 = boto3.client("ec2")
+                    lt_resp = ec2.describe_launch_template_versions(
+                        LaunchTemplateId=lt_spec.get("LaunchTemplateId"),
+                        Versions=[lt_spec.get("Version", "$Default")],
+                    )
+                    instance_type = lt_resp["LaunchTemplateVersions"][0][
+                        "LaunchTemplateData"
+                    ].get("InstanceType")
+                except Exception:
+                    instance_type = None
+
+        idx = _get_ec2_price_index(instance_type) if instance_type else None
+        if idx is None:
+            instance_type = DEFAULT_TARGET_INSTANCE_TYPE
+            idx = _get_ec2_price_index(instance_type)
+
+        hourly_price = EC2_HOURLY_PRICE_USD[idx][1]
+        avoided_cost_usd = round(avoided_instances * hourly_price, 6)
+        return avoided_cost_usd, avoided_instances, instance_type
+    except Exception as exc:
+        logger.warning(
+            "[decision_agent] EDoS avoided_cost 계산 실패 (resource_id=%s): %s",
+            resource_id,
+            exc,
+        )
+        return None
+
+
 def _build_saving_rate_only_prompt(
     action: str, anomaly_type: str, resource_type: str, raw_metrics: dict
 ) -> str:
@@ -506,14 +558,7 @@ def _build_saving_rate_only_prompt(
         """
 
 
-# [REMOVED] _build_impact_stability_prompt() — 후보별 impact/stability 점수 공식이
-# 폐기되면서 더 이상 필요 없음. 대신 LLM이 boto3 스펙을 직접 보고 액션 1개를
-# 선택하는 _build_action_selection_prompt()로 교체됨.
-
-
-# [ADDED] 관리자 대시보드의 "가용성 ↔ 비용 절감" 슬라이더(priority_weight, 0~100)를
-# LLM 선택 기준에 반영하는 지침 문구. 프론트(SettingsTab.jsx)의 3구간 설명과 경계값을
-# 그대로 맞췄다 — 관리자가 화면에서 본 설명과 실제 LLM에게 가는 지침이 일치해야 하므로.
+# 관리자가 설정한 가용성·비용 절감 우선순위를 LLM의 액션 선택 기준에 동일하게 반영한다.
 def _priority_guidance_text(priority_weight: int) -> str:
     if priority_weight <= 34:
         return (
@@ -533,7 +578,7 @@ def _priority_guidance_text(priority_weight: int) -> str:
         )
 
 
-# [ADDED] LLM이 boto3 스펙을 근거로 액션을 직접 선택하도록 만드는 프롬프트.
+# LLM이 boto3 스펙을 근거로 액션을 직접 선택하도록 만드는 프롬프트.
 def _build_action_selection_prompt(
     allowed_actions: list[str],
     anomaly_type: str,
@@ -557,10 +602,8 @@ def _build_action_selection_prompt(
   복구 가능: {spec.get("reversible", True)}
 """
 
-    # [ADDED] 액션별로 이미 결정론적으로 계산된 saving_rate/estimated_saving_usd를
-    # LLM에게 그대로 제공한다 (LLM이 비용 수치를 다시 추정하지 않도록 하기 위함).
-    # _score_components()는 dict에서 resource_type/anomaly_type/raw_metrics 세
-    # 키만 읽으므로, 전체 PipelineState 대신 이 세 값만 담은 최소 dict로 충분하다.
+    # 예상 절감액은 코드에서 정확하게 계산하고,
+    # LLM은 그 값을 그대로 사용하도록 해 비용 수치의 임의 추정을 방지한다.
     pseudo_state = {
         "resource_type": resource_type,
         "anomaly_type": anomaly_type,
@@ -590,11 +633,7 @@ def _build_action_selection_prompt(
 
     priority_weight = get_priority_weight()
 
-    # [ADDED] 2026-09-12: pseudo_code에서 쓸 변수명을 미리 고정해서 프롬프트에 못박아준다.
-    # 예전엔 "cpu_mean" 대신 "avg_cpu"/"cpu_avg" 등으로 매번 다르게 표현해서, 같은
-    # 판단 로직인데도 decision_pseudocode_promoter.py의 문자열 일치 비교(정규화 후에도)
-    # 에서 다른 패턴으로 취급되는 문제가 있었다(pseudo_code 일관성이 액션 일관성보다
-    # 훨씬 낮게 나옴). 여기서 쓸 수 있는 변수명 목록을 명시하고 그것만 쓰도록 강제한다.
+    # LLM의 의사코드 변수명을 표준화해, 같은 판단 로직이 항상 동일한 형태로 생성되도록 한다.
     metric_var_names = [f"{key}_mean" for key in metrics_summary] + [
         f"{key}_latest" for key in metrics_summary
     ]
@@ -716,12 +755,7 @@ def _estimate_saving_rate_with_llm(
     return _clamp01(parsed.get("saving_rate", 0.0))
 
 
-# [REMOVED] _estimate_impact_stability_with_llm() — 후보별 impact/stability 점수
-# 추정이 폐기되면서 더 이상 필요 없음. 대신 LLM이 boto3 스펙을 보고 액션을
-# 직접 하나 선택하는 _select_action_with_llm()으로 교체됨.
-
-
-# [ADDED] LLM이 boto3 스펙을 보고 액션 1개를 직접 추천하도록 하는 함수.
+# LLM이 boto3 스펙을 보고 액션 1개를 직접 추천하도록 하는 함수.
 def _select_action_with_llm(
     allowed_actions: list[str],
     anomaly_type: str,
@@ -768,7 +802,7 @@ def _select_action_with_llm(
     return llm_action, reason, pseudo_code
 
 
-# [ADDED] LLM의 액션 선택 판단을 JSONL에 기록 (pseudo_code 패턴 분석용).
+# LLM의 액션 선택 판단을 JSONL에 기록 (pseudo_code 패턴 분석용).
 def _log_llm_decision(
     state: PipelineState,
     allowed_actions: list[str],
@@ -870,11 +904,6 @@ def _score_components(
     estimated_saving_usd = 0.0
 
     if action == "Block":
-        # [수정] S3 대량다운로드를 risk_security(보안)가 아니라 cost_spike(비용)로
-        # 재분류하면서, Block도 "비용 급증분을 차단하는 조치"로 성격이 바뀌었다.
-        # public 접근을 막으면 그로 인한 초과 다운로드(=비용 유발분)가 실제로
-        # 없어지므로, Throttle/ScaleDown과 동일하게 "기준선 대비 급증분"을
-        # 절감액으로 계산한다 (예전엔 보안 목적이라 인위적으로 0 고정했었음).
         result = _trend_based_partial_saving(raw_metrics)
         if result is not None:
             saving_rate, estimated_saving_usd, _ = result
@@ -929,11 +958,6 @@ def decision_node(state: PipelineState) -> PipelineState:
     if not allowed_actions:
         allowed_actions = ["NoAction"]
 
-    # 2026-09-12 버그 수정: anomaly_type 기준 허용 목록을 리소스 타입에 실제로
-    # 구현된 액션과 교집합으로 다시 좁힌다 - 안 그러면 Lambda가 ScaleDown을(구현
-    # 안 됨) 제안받거나, Block의 API 설명이 리소스와 안 맞는 채로 LLM에게 간다.
-    # action_agent.py의 실제 dispatcher와 RESOURCE_IMPLEMENTED_ACTIONS를 반드시
-    # 같이 갱신할 것.
     implemented = RESOURCE_IMPLEMENTED_ACTIONS.get(resource_type, {"NoAction"})
     allowed_actions = [a for a in allowed_actions if a in implemented] or ["NoAction"]
 
@@ -1028,12 +1052,7 @@ def decision_node(state: PipelineState) -> PipelineState:
             raw_metrics, state.get("resource_id")
         )
 
-    # [ADDED] "비용이 얼마에서 얼마로 줄었는지"를 decision_reasoning에서 바로 확인할 수 있도록
-    # 현재 비용(before)과 절감 적용 후 예상 비용(after)을 함께 계산한다.
-    # Throttle/ScaleDown은 estimated_saving_usd 자체가 raw_metrics 전체 평균이 아니라
-    # "최근 급증 구간 평균 대비 기준선" 기준으로 계산되므로(_trend_based_partial_saving),
-    # before 비용도 전체 평균이 아니라 같은 최근 급증 구간 평균을 써야 앞뒤가 맞는다
-    # (target_instance_type을 위해 _ec2_resize_saving을 다시 부르는 것과 같은 패턴).
+    # 액션 적용 전·후의 예상 비용을 같은 기준으로 계산해, 비용이 얼마나 줄어드는지 판단 근거에서 바로 보여주도록 한다.
     if selected["action"] in ("Throttle", "ScaleDown", "Block"):
         trend_result = _trend_based_partial_saving(raw_metrics)
         current_cost_per_period = (
@@ -1059,26 +1078,54 @@ def decision_node(state: PipelineState) -> PipelineState:
         estimated_saving_usd,
     )
 
+    # Grafana에서 비용 예측·절감 데이터를 조회할 수 있도록 Postgres에 저장하고,
+    # 절감액이 없는 NoAction은 NULL로 처리한다.
+    if selected["action"] != "NoAction":
+        state["current_cost_usd"] = current_cost_usd
+        state["after_cost_usd"] = after_cost_usd
+        state["estimated_saving_usd"] = estimated_saving_usd
+    else:
+        state["current_cost_usd"] = None
+        state["after_cost_usd"] = None
+        state["estimated_saving_usd"] = None
+
     state["candidate_actions"] = candidates
     state["selected_action"] = selected["action"]
     state["risk_level"] = risk
     state["requires_approval"] = risk in ("MED", "HIGH")
     state["target_instance_type"] = target_instance_type
 
-    # AutoScaling EDoS 의심 시 ScaleDown만으로는 공격 트래픽 자체가 안 막힌다(인스턴스
-    # 수만 줄임) — action_agent.py에 이미 구현된 WAF Rate-based Rule을 병행 적용해야
-    # 하는데, apply_waf 기본값(False)을 아무도 True로 설정하지 않아 지금까지 한 번도
-    # 실제로 발동한 적이 없었다(2026-09-11 발견). ScaleDown+risk_security 조합에서만
-    # 켠다 — 다른 리소스/액션까지 WAF를 걸면 안 되므로 조건을 좁게 유지.
-    state["apply_waf"] = (
+    # EDoS 공격이 의심되는 AutoScaling ScaleDown 시
+    # 인스턴스 축소와 함께 WAF Rate-based 차단을 적용하도록 한다.
+    is_edos_scaledown = (
         resource_type == "AutoScaling"
         and selected["action"] == "ScaleDown"
         and anomaly_type == "risk_security"
     )
-    state["decision_pseudo_code"] = pseudo_code  # [ADDED]
+    state["apply_waf"] = is_edos_scaledown
+
+    # [ADDED] EDoS는 ScaleDown 실행 시점에 desired_capacity가 이미 낮아 실측 기반
+    # estimated_saving_usd가 거의 0으로 나온다 — 이 액션의 실제 가치(공격을 막아서
+    # ASG가 MaxSize까지 늘어나는 걸 회피함)를 반영하기 위해 avoided_cost_usd를
+    # 별도로 계산한다. estimated_saving_usd와는 절대 합산하지 않는다.
+    avoided_cost_usd = None
+    avoided_note = ""
+    if is_edos_scaledown:
+        avoided_result = _edos_avoided_scaling_cost(state.get("resource_id"))
+        if avoided_result is not None:
+            avoided_cost_usd, avoided_instances, avoided_instance_type = avoided_result
+            if avoided_instances > 0:
+                avoided_note = (
+                    f", 공격 방치 시 MaxSize까지 늘었을 경우 회피 예상 비용="
+                    f"{avoided_cost_usd:.4f} USD/hr({avoided_instances}대 "
+                    f"{avoided_instance_type} 기준, 실측 절감액과 별개의 가정 기반 추정치)"
+                )
+    state["avoided_cost_usd"] = avoided_cost_usd
+
+    state["decision_pseudo_code"] = pseudo_code
     state["decision_reasoning"] = (
         f"LLM boto3 스펙 기반 선택: '{selected_action}' - {llm_reason} "
         f"(risk={risk}, cost {current_cost_usd:.4f} -> {after_cost_usd:.4f} USD/hr, "
-        f"절감액={estimated_saving_usd:.4f}/hr)"
+        f"절감액={estimated_saving_usd:.4f}/hr{avoided_note})"
     )
     return state
