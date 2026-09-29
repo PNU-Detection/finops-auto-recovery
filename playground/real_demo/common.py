@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-from config import pipeline_live_status
+from config import pipeline_live_status, last_normal_check
 from api import pipeline_process
 from pipeline.detection_agent import _build_initial_state
 from pipeline.checkpointer import get_postgres_checkpointer
@@ -178,6 +178,19 @@ def run_real_scenario(
 
                 while True:
                     _time.sleep(1.0)
+                    # live_demo/common.py와 동일한 이유 — 승인 대기 중 write()가
+                    # 안 불리면 30초 뒤 웹 대시보드가 과거 실행 기록 폴백으로 넘어가
+                    # STOPPED로 잘못 표시된다. 또한 승인 후 실제 action~QA는
+                    # api/routers/approvals.py가 별도 백그라운드 스레드에서 처리하므로,
+                    # 그쪽이 이미 더 최신 진행 상황을 써놨으면 이 루프가 stale한 nodes로
+                    # 덮어쓰지 않고 그대로 유지한 채 시각만 갱신한다.
+                    current = pipeline_live_status.read_if_fresh()
+                    write_nodes = (
+                        current["nodes"]
+                        if current and current.get("resource_id") == resource_id
+                        else nodes
+                    )
+                    pipeline_live_status.write(write_nodes, resource_id, resource_type)
                     snapshot = approval_app.get_state(config)
                     if not snapshot.next:
                         break
@@ -230,6 +243,11 @@ def run_real_scenario(
         "raw_metrics": state.get("pre_action_raw_metrics") or state.get("raw_metrics"),
         "resource_age_seconds": state.get("resource_age_seconds"),
     }
+
+    # live_demo/common.py와 동일 — 이 시나리오가 QA까지 실제로 통과했을 때만
+    # 웹 제어판 사이드바의 "비용 정상 (OO 기준)"을 갱신한다.
+    if result.get("qa_passed") is True:
+        last_normal_check.write()
 
     # [2026-09-28] 탐지 미탐/QA 실패/액션 실패 사례가 성공 사례랑 파일명으로 안
     # 구분돼서 매번 내용을 열어봐야 했다 — 파일명만 보고 바로 골라낼 수 있게

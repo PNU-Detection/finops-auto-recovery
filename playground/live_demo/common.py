@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-from config import pipeline_live_status
+from config import pipeline_live_status, last_normal_check
 from api import pipeline_process
 from pipeline.detection_agent import _build_initial_state
 from pipeline.checkpointer import get_postgres_checkpointer
@@ -156,6 +156,27 @@ def run_live_scenario(
 
                 while True:
                     _time.sleep(1.0)
+                    # 승인 대기 중에도 노드 상태가 안 바뀌어서 write()가 호출 안 되면
+                    # FRESHNESS_SECONDS(30초) 넘게 갱신이 없어 웹 대시보드가 "지금
+                    # 실행 중"이 아니라 과거 실행 기록(폴백)으로 잘못 표시된다 — 매
+                    # 반복마다 updated_at만이라도 다시 찍는다.
+                    #
+                    # 승인은 api/routers/approvals.py가 별도 백그라운드 스레드에서
+                    # 처리한다(5분 넘게 블로킹되는 걸 피하려고) — 즉 승인 이후
+                    # action~QA 실행은 "이 프로세스"가 아니라 API 서버 쪽에서 일어나고,
+                    # 거기서도(qa_agent.py) 같은 파일에 실제 진행 상황(action=success,
+                    # qa=running 등)을 쓴다. 여기서 무조건 이 루프가 들고 있는 stale한
+                    # nodes(전부 idle)로 덮어쓰면, API 서버가 방금 쓴 진짜 진행 상황을
+                    # 1초마다 도로 idle로 되돌려버린다 — 그래서 같은 resource_id에 대해
+                    # 이미 더 최신 진행 상황이 쓰여 있으면 그걸 그대로 유지하고 시각만
+                    # 갱신한다.
+                    current = pipeline_live_status.read_if_fresh()
+                    write_nodes = (
+                        current["nodes"]
+                        if current and current.get("resource_id") == resource_id
+                        else nodes
+                    )
+                    pipeline_live_status.write(write_nodes, resource_id, resource_type)
                     snapshot = approval_app.get_state(config)
                     if not snapshot.next:
                         break
@@ -196,6 +217,12 @@ def run_live_scenario(
         "qa_passed": state.get("qa_passed"),
         "rollback_count": state.get("rollback_count"),
     }
+
+    # 웹 제어판 사이드바의 "비용 정상 (OO 기준)"은 이 시나리오가 QA까지 실제로
+    # 통과했을 때만 갱신한다 — 탐지 자체가 안 됐거나 액션/QA가 실패한 실행까지
+    # "정상"으로 표시하면 오해를 준다는 요청(2026-09-29).
+    if result.get("qa_passed") is True:
+        last_normal_check.write()
 
     # [2026-09-28] real_demo.common.py와 동일 — 파일명만 보고 실패 사례를 바로
     # 골라낼 수 있게 "_fail" 접미사를 붙인다.
