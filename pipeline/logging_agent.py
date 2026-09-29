@@ -1,23 +1,12 @@
 """
-pipeline/logging_agent.py (박소영)
+Logging Agent (Audit Log)
 
-3.3.6 Logging Agent (Audit Log)
-- 전체 에이전트 실행 과정/결과를 PostgreSQL 기반 Audit Log로 기록.
-- 테이블 3개:
-    agent_runs  : 파이프라인 실행 1회 = 1행 (리소스/이상유형/액션/리스크/QA 결과 요약)
-    agent_steps : 실행 중 거친 각 단계(detection/classification/decision/action/qa) 1행씩
-    action_log  : 실제로 액션이 실행된 경우의 상세 기록 (전/후 스냅샷, 성공 여부)
+PostgreSQL 기반 실행 로그 기록.
 
-⚠️ Grafana 시각화는 지금 단계에서 만들지 않음.
-   - 아직 AWS 미연동이라 비용 추이/탐지 빈도 등이 실데이터를 반영 못 함
-   - Grafana는 별도 서버/인프라가 필요한 운영 단계 작업
-   - 대신 나중에 바로 쓸 수 있는 패널용 SQL은 grafana_dashboard_queries.sql에 미리 정리해둠
-
-[2026-09-28] agent_steps.duration_ms, agent_runs.total_duration_ms, agent_runs의
-비용 3종(current/after/estimated_saving_usd) 실제 값 반영. graph.py의 _timed()가
-state["step_timings"]를 이미 채우고 있었는데 이 파일이 안 읽고 있었고(duration_ms
-계속 None), 비용은 decision_agent.py가 계산은 해두고 로컬 jsonl 파일에만 남겨서
-Postgres 데이터소스인 Grafana가 못 읽던 문제를 같이 고쳤다.
+테이블:
+  - agent_runs: 파이프라인 실행 1회 = 1행
+  - agent_steps: 각 단계(detection/classification/decision/action/qa) 기록
+  - action_log: 실제 액션 실행 상세 (전/후 스냅샷, 성공 여부)
 """
 
 from __future__ import annotations
@@ -373,14 +362,7 @@ def logging_node(state: PipelineState) -> PipelineState:
             logger.info("[logging_node] DB 저장 성공 (run_id=%s)", run_id)
         except Exception as e:
             conn.rollback()
-            # ⚠️ 2026-09-13 발견: 여기가 print()였을 때, Windows cp949 콘솔에서
-            # 메시지의 "—"(em dash)를 인코딩 못 해 UnicodeEncodeError로 죽었다.
-            # 그러면 이 except가 "원인 파악용으로 출력만 하고 넘어가는" 원래
-            # 의도와 반대로, 예외가 measure() 호출 전체를 타고 올라가 파이프라인이
-            # 통째로 죽어버렸다(Lambda 13개 반복시행에서 13개 전부 이렇게 유실됨).
-            # logging 모듈은 인코딩 불가 문자를 만나도 콘솔 출력에서 죽지 않는 걸
-            # 이 세션 내내 확인했으므로 print 대신 logger를 쓴다.
-            logger.error("[logging_node] DB 저장 실패 (INSERT/DDL 단계) — 원인: %r", e)
+            logger.error("[logging_node] DB 저장 실패 (INSERT/DDL 단계): %r", e)
         finally:
             conn.close()
     except Exception as e:
