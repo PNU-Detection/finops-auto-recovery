@@ -21,6 +21,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
+from api import pipeline_process
+
 router = APIRouter(prefix="/demo/attack", tags=["demo-attack"])
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -87,6 +89,15 @@ def start(scenario_id: str):
     script = _script_path(scenario_id)
     if not script.exists():
         raise HTTPException(status_code=404, detail=f"스크립트 없음: {script.name}")
+
+    # 웹제어판 "파이프라인 실행" 상시 모니터링 루프(run_full_pipeline.py --loop)도
+    # 라이브 데모 스크립트랑 똑같은 config/pipeline_live_status.json에 독립적으로
+    # write한다 — 둘이 동시에 돌면 서로 상태를 덮어써서 대시보드가 데모 중 갑자기
+    # 다른 리소스 상태로 바뀌었다 사라지는 것처럼 보인다(2026-09-30 실측 확인).
+    # 상태 표시 문제일 뿐 아니라 그 루프가 데모 중인 리소스에 실제 조치를 걸어버릴
+    # 위험도 있어서, 데모 시작 전에 항상 먼저 멈춘다.
+    if pipeline_process.is_running():
+        pipeline_process.stop()
 
     with _lock:
         if _is_scenario_active(scenario_id):
