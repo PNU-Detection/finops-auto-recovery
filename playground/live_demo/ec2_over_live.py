@@ -42,8 +42,7 @@ if str(PLAYGROUND_ROOT) not in sys.path:
 
 import boto3
 
-from common import run_live_scenario
-from config import pipeline_live_status
+from common import run_live_scenario, run_with_live_status_heartbeat
 
 SOURCE_FILE = (
     Path(__file__).parent.parent
@@ -87,12 +86,12 @@ def teardown() -> None:
 def run() -> None:
     data = json.load(open(SOURCE_FILE, encoding="utf-8"))
 
-    # 인스턴스 생성(수십 초)~run_live_scenario() 시작 전까지는 상태 파일이
-    # 안 갱신돼서 관리자 패널이 "실행 중"을 못 보여준다 — 준비 단계도 보이게
-    # 미리 한 번 찍어둔다 (2026-09-30 발견).
-    pipeline_live_status.write(pipeline_live_status.initial_nodes(), None, "EC2")
-
-    real_resource_id = _launch_real_overprovisioned_instance()
+    # 인스턴스 생성(waiter 포함 수십 초)이 FRESHNESS_SECONDS(120초)를 넘으면
+    # 관리자 패널이 "실행 중"을 놓친다 — 백그라운드 스레드로 돌리면서 준비 중에도
+    # 주기적으로 상태를 갱신한다 (2026-09-30 발견).
+    real_resource_id = run_with_live_status_heartbeat(
+        _launch_real_overprovisioned_instance, None, "EC2"
+    )
 
     run_live_scenario(
         scenario_key="ec2_over",

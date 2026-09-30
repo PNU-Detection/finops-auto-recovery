@@ -2,9 +2,9 @@
 Pipeline Live Status
 ====================
 
-run_full_pipeline.py가 LangGraph app.stream()으로 
-노드가 끝날 때마다 이 파일을 갱신하고, 
-api/routers/status.py가 이 파일이 최근에 갱신됐다면 실시간 값을, 
+run_full_pipeline.py가 LangGraph app.stream()으로
+노드가 끝날 때마다 이 파일을 갱신하고,
+api/routers/status.py가 이 파일이 최근에 갱신됐다면 실시간 값을,
 오래됐으면(프로세스가 안 돌고 있다면) 과거 실행 기록 기반 추정값을 대신 쓴다.
 """
 
@@ -17,8 +17,8 @@ from datetime import datetime, timezone
 _STATUS_PATH = os.path.join(os.path.dirname(__file__), "pipeline_live_status.json")
 
 # 이 시간(초)보다 오래 안 갱신됐으면 "더 이상 실시간 정보가 아니다"로 간주한다.
-# 노드 하나 실행에 LLM 호출 포함해도 보통 몇 초 안쪽이라, 30초면 충분히 여유 있다.
-FRESHNESS_SECONDS = 30
+# 노드 하나 실행에 LLM 호출 포함해도 보통 몇 초 안쪽이라, 120초면 충분히 여유 있다.
+FRESHNESS_SECONDS = 120
 
 STEP_NAMES = ["detection", "classification", "decision", "action", "qa", "logging"]
 
@@ -49,8 +49,9 @@ def clear() -> None:
     write({name: "idle" for name in STEP_NAMES}, None, None)
 
 
-def read_if_fresh() -> dict | None:
-    """파일이 있고 FRESHNESS_SECONDS 이내에 갱신됐으면 payload 반환, 아니면 None."""
+def _read_raw() -> tuple[dict, float] | None:
+    """파일이 있으면 (payload, age_seconds) 반환, 없거나 깨졌으면 None.
+    신선도 기준(threshold) 판단은 호출부에서 한다."""
     try:
         with open(_STATUS_PATH, "r", encoding="utf-8") as f:
             payload = json.load(f)
@@ -63,7 +64,29 @@ def read_if_fresh() -> dict | None:
         return None
 
     age_seconds = (datetime.now(timezone.utc) - updated_at).total_seconds()
+    return payload, age_seconds
+
+
+def read_if_fresh() -> dict | None:
+    """파일이 있고 FRESHNESS_SECONDS 이내에 갱신됐으면 payload 반환, 아니면 None."""
+    result = _read_raw()
+    if result is None:
+        return None
+    payload, age_seconds = result
     if age_seconds > FRESHNESS_SECONDS:
         return None
+    return payload
 
+
+def read_if_recent(max_age_seconds: float) -> dict | None:
+    """파일이 있고 max_age_seconds 이내에 갱신됐으면 payload 반환, 아니면 None.
+    read_if_fresh()보다 훨씬 긴 유예를 주고 싶을 때(예: 액션/프로비저닝처럼
+    30초를 넘게 걸리는 준비 구간에도 "완전히 무관한 과거 실행 기록"으로 화면이
+    바뀌지 않고 마지막으로 본 진행상황을 그대로 유지하고 싶을 때) 쓴다."""
+    result = _read_raw()
+    if result is None:
+        return None
+    payload, age_seconds = result
+    if age_seconds > max_age_seconds:
+        return None
     return payload

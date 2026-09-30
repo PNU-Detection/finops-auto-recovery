@@ -15,13 +15,18 @@ router = APIRouter(tags=["status"])
 _STEP_NAMES = ["detection", "classification", "decision", "action", "qa"]
 
 # "실행 중" 판단은 두 갈래로 나뉜다
-# 1) 실시간 파일(config/pipeline_live_status.py, FRESHNESS_SECONDS=30)이 최근 것이면 → 그걸 그대로 씀.
+# 1) 실시간 파일(config/pipeline_live_status.py, FRESHNESS_SECONDS=120)이 최근 것이면 → 그걸 그대로 씀.
 #      run_full_pipeline.py가 지금 이 순간 stream()으로 노드를
 #      갱신하고 있다는 뜻이라 pipeline_running=True 확정.
 # 2) 실시간 파일이 없거나 오래됐으면(=지금 아무 프로세스도 안 돌고 있음) → 아래 _load_pipeline_status()의 "과거 기록 기반 추정"으로 대체.
 #    이때 쓰는 기준이 _STALE_CYCLES (마지막으로 끝난 실행이 폴링 주기의 3배 이내면
 #    그래도 최근에 돌았다고 봄, 한 사이클 정도 응답이 늦어져도 바로 STOPPED로 오판하지 않으려는 여유값)
 _STALE_CYCLES = 3
+
+# read_if_fresh()(30초)는 지났지만 그래도 실시간 payload를 유지해줄 유예 구간.
+# EDoS ASG 신규 프로비저닝(waiter+지표 워밍업)처럼 몇 분씩 걸리는 준비 단계나,
+# 액션 하나가 waiter 대기로 오래 걸리는 경우까지 넉넉히 커버하도록 10분으로 둔다.
+_LIVE_STATUS_GRACE_SECONDS = 600
 
 
 def _load_pipeline_status() -> tuple[dict, bool, datetime | None]:
@@ -118,14 +123,22 @@ def get_status():
         + len(engine.qa_rules)
     )
 
-    # 1) 실시간(pipeline_live_status.FRESHNESS_SECONDS=30초 이내) 우선,
-    # 2) 없으면 과거 기록 기반 추정(_load_pipeline_status, 기준은 위 _STALE_CYCLES)
+    # 1) 실시간(30초 이내) 우선
+    # 2) 30초는 지났지만 유예 구간(_LIVE_STATUS_GRACE_SECONDS) 이내면 그래도 마지막
+    #    실시간 payload를 그대로 유지 — 액션/프로비저닝처럼 30초를 넘게 걸리는
+    #    구간에서 write가 잠깐 뜸해질 때마다 화면이 "완전히 무관한 과거 실행
+    #    기록"으로 튀어버리는 문제(2026-09-30 반복 실측 확인)를 막기 위함. write가
+    #    뜸해도 마지막으로 본 진행 상황을 그대로 얼려서 보여주는 게, 매번 다른
+    #    리소스의 과거 기록으로 화면이 바뀌는 것보다 훨씬 덜 혼란스럽다.
+    # 3) 유예 구간마저 지나면(=진짜 오래 아무 것도 안 돔) 과거 기록 기반 추정으로 대체
     #
     # as_of: 지금 보여주는 nodes/pipeline_running이 "몇 시 기준" 정보인지 —
-    # 실시간 경로면 그 payload가 갱신된 시각, 폴백 경로면 마지막으로 끝난 실행의
+    # 실시간/유예 경로면 그 payload가 갱신된 시각, 폴백 경로면 마지막으로 끝난 실행의
     # 종료 시각. last_normal_check_at(상시 모니터링 루프가 "이상 없음"으로 스캔을
     # 마친 시각)과는 별개 필드다 — 혼동하지 말 것.
-    live = pipeline_live_status.read_if_fresh()
+    live = pipeline_live_status.read_if_fresh() or pipeline_live_status.read_if_recent(
+        _LIVE_STATUS_GRACE_SECONDS
+    )
     if live is not None:
         nodes, pipeline_running = live["nodes"], True
         as_of = live["updated_at"]

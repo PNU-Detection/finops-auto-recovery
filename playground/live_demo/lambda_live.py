@@ -49,8 +49,7 @@ from lambda_retry_trial import (
     _get_or_create_lambda_role,
 )
 
-from common import run_live_scenario
-from config import pipeline_live_status
+from common import run_live_scenario, run_with_live_status_heartbeat
 
 SOURCE_FILE = (
     Path(__file__).parent.parent
@@ -76,18 +75,17 @@ def run() -> None:
     data = json.load(open(SOURCE_FILE, encoding="utf-8"))
     resource_id = data["resource_id"]
 
-    # 함수 준비(IAM 롤/zip 패키징 등)~run_live_scenario() 시작 전까지는 상태
-    # 파일이 안 갱신돼서 관리자 패널이 "실행 중"을 못 보여준다 — 준비 단계도
-    # 보이게 미리 한 번 찍어둔다 (2026-09-30 발견).
-    pipeline_live_status.write(
-        pipeline_live_status.initial_nodes(), resource_id, "Lambda"
-    )
+    def _prepare_function() -> None:
+        iam = boto3.client("iam", region_name=AWS_REGION)
+        lam = boto3.client("lambda", region_name=AWS_REGION)
+        role_arn = _get_or_create_lambda_role(iam)
+        _ensure_lambda_function(lam, resource_id, role_arn, _create_lambda_zip())
+        print(f"[lambda_live] 함수 존재 확인/생성 완료: {resource_id}")
 
-    iam = boto3.client("iam", region_name=AWS_REGION)
-    lam = boto3.client("lambda", region_name=AWS_REGION)
-    role_arn = _get_or_create_lambda_role(iam)
-    _ensure_lambda_function(lam, resource_id, role_arn, _create_lambda_zip())
-    print(f"[lambda_live] 함수 존재 확인/생성 완료: {resource_id}")
+    # 함수 준비(IAM 롤 생성/zip 패키징 등)가 FRESHNESS_SECONDS(120초)를 넘으면
+    # 관리자 패널이 "실행 중"을 놓친다 — 백그라운드 스레드로 돌리면서 준비 중에도
+    # 주기적으로 상태를 갱신한다 (2026-09-30 발견).
+    run_with_live_status_heartbeat(_prepare_function, resource_id, "Lambda")
 
     run_live_scenario(
         scenario_key="lambda",

@@ -89,7 +89,7 @@ export default function App() {
   useEffect(() => {
     if (!isAuthed) return;
     refreshStatus();
-    const interval = setInterval(refreshStatus, 5000);
+    const interval = setInterval(refreshStatus, 1500);
     return () => clearInterval(interval);
   }, [isAuthed, refreshStatus]);
 

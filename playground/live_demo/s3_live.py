@@ -34,8 +34,7 @@ import boto3
 
 from s3_repeated_trial import AWS_REGION, _ensure_bucket_with_metrics
 
-from common import run_live_scenario
-from config import pipeline_live_status
+from common import run_live_scenario, run_with_live_status_heartbeat
 
 SOURCE_FILE = (
     Path(__file__).parent.parent / "team_results" / "s3" / "repeated_trial.json"
@@ -69,14 +68,15 @@ def run() -> None:
     after = trial["after"]
     resource_id = after["resource_id"]
 
-    # 버킷 준비~run_live_scenario() 시작 전까지는 상태 파일이 안 갱신돼서
-    # 관리자 패널이 "실행 중"을 못 보여준다 — 준비 단계도 보이게 미리 한 번
-    # 찍어둔다 (2026-09-30 발견).
-    pipeline_live_status.write(pipeline_live_status.initial_nodes(), resource_id, "S3")
+    def _prepare_bucket() -> None:
+        s3 = boto3.client("s3", region_name=AWS_REGION)
+        _ensure_bucket_with_metrics(s3, resource_id)
+        print(f"[s3_live] 버킷 존재 확인/생성 완료: {resource_id}")
 
-    s3 = boto3.client("s3", region_name=AWS_REGION)
-    _ensure_bucket_with_metrics(s3, resource_id)
-    print(f"[s3_live] 버킷 존재 확인/생성 완료: {resource_id}")
+    # 버킷 준비가 FRESHNESS_SECONDS(120초)를 넘으면 관리자 패널이 "실행 중"을
+    # 놓친다 — 백그라운드 스레드로 돌리면서 준비 중에도 주기적으로 상태를
+    # 갱신한다 (2026-09-30 발견).
+    run_with_live_status_heartbeat(_prepare_bucket, resource_id, "S3")
 
     run_live_scenario(
         scenario_key="s3",

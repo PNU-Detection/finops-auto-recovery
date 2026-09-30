@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import os
 import logging
+import threading
 
 import boto3
 from botocore.exceptions import ClientError, WaiterError
 
 import json
 
+from config import pipeline_live_status
 from schema.state import (
     PipelineState,
     EC2Snapshot,
@@ -439,6 +441,45 @@ def execute_action(
     }
 
 
+# qa_agent.py의 POST_ACTION_WAIT_SECONDS 대기와 같은 이유 — 액션(특히 EC2
+# waiter, ASG 대기, WAF 생성 등)이 FRESHNESS_SECONDS(120초)를 넘겨 걸리면
+# 그동안 common.py의 _track_stream()이 다음 청크를 못 받아 write()를 못 불러서
+# 웹 대시보드가 "action 실행 중"을 아예 못 보고 건너뛴 것처럼 보인다(2026-09-30
+# 실측 확인 — EDoS 액션이 43.9초 걸리는데 러닝 표시가 전혀 안 됨). QA는 자기
+# 대기가 단순 sleep이라 구간을 쪼개면 됐지만, 액션은 대기 자체가 실제 API
+# 호출이라 쪼갤 수 없어 별도 스레드로 돌리면서 메인 스레드가 주기적으로
+# write()한다.
+_LIVE_STATUS_REFRESH_INTERVAL_SECONDS = 15
+
+
+def _run_with_live_status_refresh(fn, resource_id: str, resource_type: str):
+    """fn()을 백그라운드 스레드에서 실행하는 동안, 메인 스레드가 주기적으로
+    pipeline_live_status를 "action 진행 중"으로 갱신한다."""
+    nodes = {name: "success" for name in pipeline_live_status.STEP_NAMES}
+    nodes["action"] = "running"
+    nodes["qa"] = "idle"
+    nodes["logging"] = "idle"
+
+    result_box: dict = {}
+    error_box: dict = {}
+
+    def _worker():
+        try:
+            result_box["value"] = fn()
+        except Exception as exc:
+            error_box["error"] = exc
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        pipeline_live_status.write(nodes, resource_id, resource_type)
+        thread.join(timeout=_LIVE_STATUS_REFRESH_INTERVAL_SECONDS)
+
+    if "error" in error_box:
+        raise error_box["error"]
+    return result_box["value"]
+
+
 def action_node(state: PipelineState) -> PipelineState:
     """
     입력: state["selected_action"], state["resource_type"], state["resource_id"],
@@ -477,24 +518,26 @@ def action_node(state: PipelineState) -> PipelineState:
         state["action_result"] = {"status": "pending_approval"}
         return state
 
-    # dry_run 모드에서는 스냅샷 생략
-    if dry_run:
-        state["pre_action_snapshot"] = None
-    else:
-        # 1. 액션 실행 전 스냅샷 (롤백용, 반드시 먼저 — 보고서 4.3절)
-        state["pre_action_snapshot"] = take_snapshot(resource_type, resource_id)
+    def _do_action() -> tuple[dict | None, dict]:
+        # 1. 액션 실행 전 스냅샷 (롤백용, 반드시 먼저 — 보고서 4.3절, dry_run이면 생략)
+        snapshot = None if dry_run else take_snapshot(resource_type, resource_id)
+        # 2. 실제 액션 실행 (또는 dry_run 계획)
+        action_result = execute_action(
+            action,
+            resource_type,
+            resource_id,
+            target_instance_type=state.get("target_instance_type"),
+            dry_run=dry_run,
+            apply_waf=apply_waf,
+            waf_rate_limit=waf_rate_limit,
+            associated_alb_arn=associated_alb_arn,
+        )
+        return snapshot, action_result
 
-    # 2. 실제 액션 실행 (또는 dry_run 계획)
-    result = execute_action(
-        action,
-        resource_type,
-        resource_id,
-        target_instance_type=state.get("target_instance_type"),
-        dry_run=dry_run,
-        apply_waf=apply_waf,
-        waf_rate_limit=waf_rate_limit,
-        associated_alb_arn=associated_alb_arn,
+    snapshot, result = _run_with_live_status_refresh(
+        _do_action, resource_id, resource_type
     )
+    state["pre_action_snapshot"] = snapshot
 
     state["action_executed"] = action
     state["action_result"] = result

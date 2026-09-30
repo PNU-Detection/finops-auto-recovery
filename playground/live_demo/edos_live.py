@@ -43,8 +43,7 @@ import boto3
 
 from autoscaling_edos_traffic_trial import AWS_REGION, setup_all, teardown_all
 
-from common import run_live_scenario
-from config import pipeline_live_status
+from common import run_live_scenario, run_with_live_status_heartbeat
 
 SOURCE_FILE = (
     Path(__file__).parent.parent
@@ -117,14 +116,12 @@ def run() -> None:
     data = json.load(open(SOURCE_FILE, encoding="utf-8"))
     resource_id = data["resource_id"]
 
-    # ASG 준비(신규면 2~3분+워밍업)~run_live_scenario() 시작 전까지는 상태
-    # 파일이 안 갱신돼서 관리자 패널이 "실행 중"을 못 보여준다 — 준비 단계도
-    # 보이게 미리 한 번 찍어둔다 (2026-09-30 발견).
-    pipeline_live_status.write(
-        pipeline_live_status.initial_nodes(), resource_id, "AutoScaling"
+    # ASG 준비(신규면 2~3분 프로비저닝 + 3분 지표 워밍업)가 FRESHNESS_SECONDS
+    # (30초)를 훌쩍 넘는다 — 백그라운드 스레드로 돌리면서 준비 중에도 주기적으로
+    # 상태를 갱신한다 (2026-09-30 발견).
+    run_with_live_status_heartbeat(
+        lambda: _ensure_asg_exists(resource_id), resource_id, "AutoScaling"
     )
-
-    _ensure_asg_exists(resource_id)
 
     run_live_scenario(
         scenario_key="edos",

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,41 @@ from pipeline.graph import build_approval_graph
 from pipeline import cost_estimator
 
 LOG_ROOT = Path(__file__).parent / "logs"
+
+# EC2 생성+waiter, ASG 신규 프로비저닝 등 run_live_scenario() 시작 전 준비 단계가
+# FRESHNESS_SECONDS(120초)를 넘게 걸리면, 시작 시점에 한 번만 write()해도 그
+# write가 준비가 끝나기 전에 stale해져서 웹 대시보드가 "실행 중"을 놓치고
+# STOPPED로 잘못 표시한다(2026-09-30 실측 확인 — pipeline/action_agent.py의
+# _run_with_live_status_refresh와 같은 이유, 같은 해법). 준비 함수를 별도
+# 스레드로 돌리면서 메인 스레드가 주기적으로 write한다.
+_LIVE_STATUS_REFRESH_INTERVAL_SECONDS = 15
+
+
+def run_with_live_status_heartbeat(fn, resource_id: str | None, resource_type: str):
+    """fn()을 백그라운드 스레드에서 실행하는 동안, 메인 스레드가 주기적으로
+    pipeline_live_status를 "준비 중(detection running)"으로 갱신한다.
+    각 시나리오 스크립트의 리소스 프로비저닝 호출(EC2 launch, ASG 생성 등)을
+    감싸는 용도."""
+    nodes = pipeline_live_status.initial_nodes()
+
+    result_box: dict = {}
+    error_box: dict = {}
+
+    def _worker():
+        try:
+            result_box["value"] = fn()
+        except Exception as exc:
+            error_box["error"] = exc
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        pipeline_live_status.write(nodes, resource_id, resource_type)
+        thread.join(timeout=_LIVE_STATUS_REFRESH_INTERVAL_SECONDS)
+
+    if "error" in error_box:
+        raise error_box["error"]
+    return result_box["value"]
 
 
 def _track_stream(
@@ -157,7 +193,7 @@ def run_live_scenario(
                 while True:
                     _time.sleep(1.0)
                     # 승인 대기 중에도 노드 상태가 안 바뀌어서 write()가 호출 안 되면
-                    # FRESHNESS_SECONDS(30초) 넘게 갱신이 없어 웹 대시보드가 "지금
+                    # FRESHNESS_SECONDS(120초) 넘게 갱신이 없어 웹 대시보드가 "지금
                     # 실행 중"이 아니라 과거 실행 기록(폴백)으로 잘못 표시된다 — 매
                     # 반복마다 updated_at만이라도 다시 찍는다.
                     #
