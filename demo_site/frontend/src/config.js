@@ -31,6 +31,7 @@ export const SCENARIOS = [
     index: 3,
     title: "Lambda 스로틀 재시도 폭증",
     category: "cost",
+    runLabel: "에러 실행",
     description: "Lambda 동시성 한도 초과로 재시도가 급증하는 상황을 생성합니다.",
     requiresApproval: true,
   },

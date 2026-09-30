@@ -3,9 +3,10 @@ import { colors, font, card, button, STATUS_PILL, CATEGORY_BADGE } from "../styl
 export default function ScenarioCard({ scenario, status, isRunningThis, disabled, onRun, onReset }) {
   const categoryBadge = CATEGORY_BADGE[scenario.category];
   const statusPill = STATUS_PILL[status] || STATUS_PILL.idle;
-  // 좀비/오버프로비저닝/Lambda(COST)는 "공격"이 아니라 비용 낭비 패턴이라
-  // 버튼 문구를 카테고리별로 다르게 한다.
-  const runLabel = scenario.category === "security" ? "공격 실행" : "낭비 실행";
+  // 좀비/오버프로비저닝은 "공격"이 아니라 비용 낭비 패턴, Lambda 스로틀은 동시성
+  // 소진으로 인한 에러성 재시도 폭증이라 "낭비"보다 "에러"가 더 맞음 -> 시나리오별
+  // runLabel로 오버라이드 가능하게 하고, 없으면 카테고리 기본값을 쓴다.
+  const runLabel = scenario.runLabel ?? (scenario.category === "security" ? "공격 실행" : "낭비 실행");
 
   return (
     <article
