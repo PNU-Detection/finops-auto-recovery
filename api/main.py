@@ -20,6 +20,7 @@ from api.auth import verify_session_token
 from api.routers import (
     approvals,
     auth,
+    demo_attack,
     failures,
     logs,
     notifications,
@@ -60,6 +61,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:3001",
+        "http://localhost:3100",
         "https://detection.vercel.app",
     ],
     allow_methods=["*"],
@@ -69,6 +71,9 @@ app.add_middleware(
 
 # 로그인/로그아웃은 인증 없이 접근 가능해야 함
 app.include_router(auth.router)
+
+# 데모데이 공격 시연 사이트(demo_site/) 전용 (로컬에서만)
+app.include_router(demo_attack.router)
 
 # 나머지는 전부 로그인 세션 토큰 필요
 _protected = Depends(verify_session_token)
