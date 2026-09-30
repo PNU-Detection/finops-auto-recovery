@@ -31,6 +31,8 @@ config/llm_usage.json
 
 # 프론트엔드 의존성 (npm install로 복원 가능, 커밋 대상 아님)
 frontend/node_modules/
+demo_site/frontend/node_modules/
 
 # 기타
 .artifact_scratch/
+.ruff_cache/
