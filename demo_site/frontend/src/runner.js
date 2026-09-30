@@ -75,6 +75,7 @@ export const ApiRunner = {
     callbacks.onStatus("running");
 
     let lastStatus = "running";
+    let lastMessage = null;
 
     while (true) {
       await sleep(CONFIG.pollIntervalMs);
@@ -90,9 +91,16 @@ export const ApiRunner = {
         } else if (lastStatus === "pending_approval" && data.status === "running") {
           callbacks.onLog("승인 완료 확인 — 조치 진행", "info");
         }
-        if (data.message) callbacks.onLog(data.message, "info");
         callbacks.onStatus(data.status);
         lastStatus = data.status;
+      }
+
+      // status는 대부분 "running"으로 안 바뀌지만 백엔드는 스크립트 출력 줄마다
+      // message를 갱신하므로, status 전환과 별개로 message 자체의 변화를 감지해야
+      // 중간 진행 로그가 안 끊긴다.
+      if (data.message && data.message !== lastMessage) {
+        callbacks.onLog(data.message, "info");
+        lastMessage = data.message;
       }
 
       if (data.status === "succeeded") return { status: "succeeded" };
