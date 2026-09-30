@@ -205,25 +205,5 @@
     "updated_at": "2026-09-01T11:30:32Z",
     "author": "auto-promoted",
     "rationale": "5건의 LLM 판단 로그 기반 자동 승격, 승격일 2026-09-01"
-  },
-  {
-    "rule_id": "CLF-008",
-    "rule_type": "classification",
-    "created_at": "2026-09-01T11:48:17Z",
-    "updated_at": "2026-09-30T00:00:00Z",
-    "author": "admin",
-    "enabled": false,
-    "description": "EC2 cpu<10% -> cost_spike",
-    "resource_types": [
-      "EC2"
-    ],
-    "conditions": {
-      "custom": "cpu<10%"
-    },
-    "result": {
-      "anomaly_type": "cost_spike"
-    },
-    "priority": 50,
-    "rationale": "관리자가 수동 추가 (2026-09-30: CLF-004와 충돌 -- 좀비 EC2가 cost_inefficiency 대신 cost_spike로 오분류되어 NoAction 처리되는 버그 원인으로 확인, 비활성화)"
   }
 ]
