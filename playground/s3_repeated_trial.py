@@ -166,6 +166,24 @@ def _ensure_bucket_with_metrics(s3, name: str) -> None:
     )
     logger.info("Request Metrics(EntireBucket) 활성화: %s", name)
 
+    # [2026-09-30 발견] AWS가 2023-04부터 신규 버킷의 Block Public Access를
+    # 기본 ON으로 바꿔서, action_agent._execute_s3_block()이 그 4개 설정을
+    # True로 켜도 "이미 켜진 걸 또 켜는" 상태라 콘솔/데모에서 액션 전후 변화가
+    # 전혀 안 보였다 — 시나리오 실행 전마다 매번 꺼서 액션이 실제로 뭔가를
+    # 바꾸는 걸 보여준다. 버킷 정책/ACL로 퍼블릭 권한을 따로 부여한 적이 없어서
+    # 이 스위치만 꺼도 실제로 퍼블릭 읽기가 가능해지지는 않는다(S3는 기본이
+    # private이고 BPA는 그 위의 안전장치일 뿐) — 데모 목적상 안전하게 꺼도 됨.
+    s3.put_public_access_block(
+        Bucket=name,
+        PublicAccessBlockConfiguration={
+            "BlockPublicAcls": False,
+            "IgnorePublicAcls": False,
+            "BlockPublicPolicy": False,
+            "RestrictPublicBuckets": False,
+        },
+    )
+    logger.info("Block Public Access 초기화(OFF) — 데모용: %s", name)
+
 
 def setup_buckets(n_anomaly: int, n_normal: int) -> tuple[list[str], list[str]]:
     """anomaly n_anomaly개 + normal n_normal개 버킷을 생성하고 Request Metrics를 켠다."""
