@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -43,6 +44,7 @@ import boto3
 from autoscaling_edos_traffic_trial import AWS_REGION, setup_all, teardown_all
 
 from common import run_live_scenario
+from config import pipeline_live_status
 
 SOURCE_FILE = (
     Path(__file__).parent.parent
@@ -62,12 +64,22 @@ SOURCE_FILE = (
 LIVE_DEMO_ASG_MAX_SIZE = 4
 
 
+# GroupInServiceInstances는 CloudWatch 기본 모니터링(5분 단위) 지표라, ASG를
+# 막 만든 직후에는 "인스턴스가 헬스체크 통과 전이라 0이었던" 워밍업 구간이 그
+# 5분 평균에 섞여 QA의 실측 재조회(POST_ACTION_WAIT_SECONDS=300초 후 1회 조회)가
+# "인스턴스 0개 -> 가용성 SLA 위반"으로 오탐할 수 있다(2026-09-30 실측 확인 —
+# WAF/ScaleDown 자체는 정상이었는데 QA만 잘못 롤백시킴). ASG를 새로 만든 경우에만
+# 인스턴스가 InService로 올라온 뒤 지표가 안정될 시간을 추가로 벌어준다.
+_METRIC_WARMUP_SECONDS = 180
+
+
 def _ensure_asg_exists(asg_name: str) -> None:
     asg = boto3.client("autoscaling", region_name=AWS_REGION)
     existing = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])[
         "AutoScalingGroups"
     ]
-    if not existing:
+    newly_created = not existing
+    if newly_created:
         print(f"[edos_live] ASG 없음 — ALB+ASG 신규 프로비저닝 (2~3분 소요)")
         setup_all(n_anomaly=1, n_normal=0)
     else:
@@ -83,6 +95,15 @@ def _ensure_asg_exists(asg_name: str) -> None:
             "(EDoS 회피 비용 추정을 위해 live_demo 전용으로만 적용, DesiredCapacity는 그대로 유지)"
         )
 
+    if newly_created:
+        print("[edos_live] 인스턴스 InService 대기 중...")
+        asg.get_waiter("group_in_service").wait(AutoScalingGroupNames=[asg_name])
+        print(
+            f"[edos_live] InService 확인, CloudWatch 지표 안정화 대기 중 "
+            f"({_METRIC_WARMUP_SECONDS}초)..."
+        )
+        time.sleep(_METRIC_WARMUP_SECONDS)
+
 
 def teardown() -> None:
     """⚠️ 이 ALB+ASG(detection-traffic-asg-anomaly-0)는 real_demo/edos_real.py와
@@ -95,6 +116,13 @@ def teardown() -> None:
 def run() -> None:
     data = json.load(open(SOURCE_FILE, encoding="utf-8"))
     resource_id = data["resource_id"]
+
+    # ASG 준비(신규면 2~3분+워밍업)~run_live_scenario() 시작 전까지는 상태
+    # 파일이 안 갱신돼서 관리자 패널이 "실행 중"을 못 보여준다 — 준비 단계도
+    # 보이게 미리 한 번 찍어둔다 (2026-09-30 발견).
+    pipeline_live_status.write(
+        pipeline_live_status.initial_nodes(), resource_id, "AutoScaling"
+    )
 
     _ensure_asg_exists(resource_id)
 

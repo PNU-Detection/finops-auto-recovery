@@ -43,6 +43,7 @@ if str(PLAYGROUND_ROOT) not in sys.path:
 import boto3
 
 from common import run_live_scenario
+from config import pipeline_live_status
 
 SOURCE_FILE = (
     Path(__file__).parent.parent
@@ -85,6 +86,11 @@ def teardown() -> None:
 
 def run() -> None:
     data = json.load(open(SOURCE_FILE, encoding="utf-8"))
+
+    # 인스턴스 생성(수십 초)~run_live_scenario() 시작 전까지는 상태 파일이
+    # 안 갱신돼서 관리자 패널이 "실행 중"을 못 보여준다 — 준비 단계도 보이게
+    # 미리 한 번 찍어둔다 (2026-09-30 발견).
+    pipeline_live_status.write(pipeline_live_status.initial_nodes(), None, "EC2")
 
     real_resource_id = _launch_real_overprovisioned_instance()
 

@@ -35,6 +35,7 @@ import boto3
 from s3_repeated_trial import AWS_REGION, _ensure_bucket_with_metrics
 
 from common import run_live_scenario
+from config import pipeline_live_status
 
 SOURCE_FILE = (
     Path(__file__).parent.parent / "team_results" / "s3" / "repeated_trial.json"
@@ -67,6 +68,11 @@ def run() -> None:
     trial = data["anomaly_trials"][0]
     after = trial["after"]
     resource_id = after["resource_id"]
+
+    # 버킷 준비~run_live_scenario() 시작 전까지는 상태 파일이 안 갱신돼서
+    # 관리자 패널이 "실행 중"을 못 보여준다 — 준비 단계도 보이게 미리 한 번
+    # 찍어둔다 (2026-09-30 발견).
+    pipeline_live_status.write(pipeline_live_status.initial_nodes(), resource_id, "S3")
 
     s3 = boto3.client("s3", region_name=AWS_REGION)
     _ensure_bucket_with_metrics(s3, resource_id)

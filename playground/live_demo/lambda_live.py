@@ -50,6 +50,7 @@ from lambda_retry_trial import (
 )
 
 from common import run_live_scenario
+from config import pipeline_live_status
 
 SOURCE_FILE = (
     Path(__file__).parent.parent
@@ -74,6 +75,13 @@ def teardown() -> None:
 def run() -> None:
     data = json.load(open(SOURCE_FILE, encoding="utf-8"))
     resource_id = data["resource_id"]
+
+    # 함수 준비(IAM 롤/zip 패키징 등)~run_live_scenario() 시작 전까지는 상태
+    # 파일이 안 갱신돼서 관리자 패널이 "실행 중"을 못 보여준다 — 준비 단계도
+    # 보이게 미리 한 번 찍어둔다 (2026-09-30 발견).
+    pipeline_live_status.write(
+        pipeline_live_status.initial_nodes(), resource_id, "Lambda"
+    )
 
     iam = boto3.client("iam", region_name=AWS_REGION)
     lam = boto3.client("lambda", region_name=AWS_REGION)
