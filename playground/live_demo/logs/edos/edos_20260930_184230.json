@@ -1,0 +1,52 @@
+{
+  "scenario_key": "edos",
+  "resource_id": "detection-traffic-asg-anomaly-0",
+  "resource_type": "AutoScaling",
+  "run_started_at": "2026-09-30T18:42:30.345300+00:00",
+  "run_ended_at": "2026-09-30T18:47:47.164683+00:00",
+  "elapsed_seconds_total": 316.82,
+  "step_timings_ms": {
+    "detection": 3362,
+    "classification": 10,
+    "decision": 558,
+    "action": 1942,
+    "qa": 302146
+  },
+  "estimated_cost_usd": 0.0,
+  "anomaly_flag": true,
+  "anomaly_score_zscore": 1.2554,
+  "anomaly_score_iforest": 1.0,
+  "triggered_metrics": [],
+  "ec2_utilization_band": null,
+  "anomaly_type": "risk_security",
+  "selected_action": "ScaleDown",
+  "risk_level": "HIGH",
+  "requires_approval": false,
+  "action_result": {
+    "status": "success",
+    "scaledown_result": {
+      "status": "success",
+      "previous_max_size": 4,
+      "previous_desired_capacity": 1,
+      "new_max_size": 2,
+      "new_desired_capacity": 1
+    },
+    "waf_result": {
+      "status": "success",
+      "resource_arn": "arn:aws:elasticloadbalancing:ap-northeast-2:931253429326:loadbalancer/app/detection-traffic-alb/e617f90fd6a8da4d",
+      "rule_name": "rate-limit-detection-traffic-asg-anomaly-0",
+      "limit": 2000,
+      "aggregate_key": "IP",
+      "scope": "REGIONAL",
+      "web_acl_name": "auto-rate-limit-1790774705",
+      "web_acl_id": "304fe1fa-f024-499e-87be-c6cc6c845109"
+    },
+    "auto_scaling_group_name": "detection-traffic-asg-anomaly-0",
+    "target_capacity": 2,
+    "associated_alb_arn": "arn:aws:elasticloadbalancing:ap-northeast-2:931253429326:loadbalancer/app/detection-traffic-alb/e617f90fd6a8da4d",
+    "waf_rate_limit": 2000,
+    "waf_rule_name": "rate-limit-detection-traffic-asg-anomaly-0"
+  },
+  "qa_passed": true,
+  "rollback_count": 0
+}

@@ -1,5 +1,5 @@
 {
-  "alb_dns": "detection-traffic-alb-387775302.ap-northeast-2.elb.amazonaws.com",
+  "alb_dns": "detection-traffic-alb-2074660195.ap-northeast-2.elb.amazonaws.com",
   "ports": {
     "detection-traffic-asg-anomaly-0": 8001
   }

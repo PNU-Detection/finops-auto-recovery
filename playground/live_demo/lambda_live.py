@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -50,6 +51,7 @@ from lambda_retry_trial import (
 )
 
 from common import run_live_scenario, run_with_live_status_heartbeat
+import resources_manifest
 
 SOURCE_FILE = (
     Path(__file__).parent.parent
@@ -58,6 +60,16 @@ SOURCE_FILE = (
     / "lambda"
     / "lambda_20260928_151235_fail.json"
 )
+
+
+def _reset_to_normal(resource_id: str) -> None:
+    """Lambda 스로틀 시나리오의 정상 상태 = 동시성 제한 없음(Reserved concurrency 미설정)."""
+    lam = boto3.client("lambda", region_name=AWS_REGION)
+    try:
+        lam.delete_function_concurrency(FunctionName=resource_id)
+        print(f"[lambda_live] 정상 상태로 리셋 완료(동시성 제한 해제): {resource_id}")
+    except Exception as exc:
+        print(f"[lambda_live] 리셋 실패: {exc}")
 
 
 def teardown() -> None:
@@ -87,22 +99,40 @@ def run() -> None:
     # 주기적으로 상태를 갱신한다 (2026-09-30 발견).
     run_with_live_status_heartbeat(_prepare_function, resource_id, "Lambda")
 
-    run_live_scenario(
-        scenario_key="lambda",
-        resource_id=resource_id,
-        resource_type="Lambda",
-        raw_metrics=data["raw_metrics"],
-        resource_age_seconds=data.get("resource_age_seconds"),
-    )
+    try:
+        run_live_scenario(
+            scenario_key="lambda",
+            resource_id=resource_id,
+            resource_type="Lambda",
+            raw_metrics=data["raw_metrics"],
+            resource_age_seconds=data.get("resource_age_seconds"),
+        )
+    finally:
+        print(
+            f"[lambda_live] {resources_manifest.RESET_DELAY_SECONDS}초 후 정상 상태로 "
+            "리셋합니다 (콘솔 확인 시간)..."
+        )
+        time.sleep(resources_manifest.RESET_DELAY_SECONDS)
+        _reset_to_normal(resource_id)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--teardown", action="store_true")
+    parser.add_argument(
+        "--teardown",
+        action="store_true",
+        help="정상 상태로 리셋(삭제 아님) — demo_attack.py의 리셋 버튼도 이걸 호출",
+    )
+    parser.add_argument(
+        "--full-teardown", action="store_true", help="Lambda 함수를 실제로 삭제"
+    )
     args = parser.parse_args()
 
-    if args.teardown:
+    if args.full_teardown:
         teardown()
+    elif args.teardown:
+        data = json.load(open(SOURCE_FILE, encoding="utf-8"))
+        _reset_to_normal(data["resource_id"])
     else:
         run()
 

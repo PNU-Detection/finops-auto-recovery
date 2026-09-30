@@ -8,23 +8,15 @@ EC2 오버프로비저닝(저활용 지속) 시나리오 실시간 데모.
 소스: playground/real_demo/logs/ec2_over/ec2_over_20260928_170104.json
       (오늘 real_demo ec2_over_real.py --run 실측 결과 — anomaly_flag=True,
        ec2_utilization_band=overprovisioned, action=Resize, risk=MED,
-       qa_passed=True까지 전부 성공한 실행. 예전엔 ec2_overprovision_repeated_trial
-       ...json(계정 이전 전 캡처)을 썼는데, duty-cycle 부하 스크립트의 셸
-       이스케이프 버그(ec2_overprovision_setup.py, 2026-09-28 수정) 때문에 그
-       데이터의 CPU가 항상 0%대로 찍혀 있었다 — 이제 버그를 고치고 재측정해
-       목표치인 12%대가 정확히 나온 새 데이터로 교체함.
+       qa_passed=True까지 전부 성공한 실행.)
 
-⚠️ 2026-09-27 발견(zombie_live.py와 동일한 문제·동일한 대응): 이 raw_metrics는
-다른(예전) 계정/실행에서 실측된 데이터라 그 안의 resource_id(인스턴스 ID)가
-지금 계정엔 없다 — Resize 액션은 실제 describe_instances로 현재 인스턴스
-타입을 조회해 다운사이즈 대상을 정하므로(decision_agent._ec2_resize_saving),
-진짜 인스턴스가 있어야 한다. 그래서 지금 계정에 실제 EC2 인스턴스를 하나
-새로 띄우고, **그 실제 instance_id로 resource_id를 바꿔치기**한다.
+[2026-10-01 변경] 예전엔 실행할 때마다 새 EC2 인스턴스를 띄우고 --teardown으로
+지웠는데, setup_all.py가 미리 만들어둔 고정 인스턴스(t3.small)를
+resources_manifest에서 읽어 재사용하고, 시나리오가 끝나면(성공/실패 무관)
+정상 상태(t3.small, running)로 리셋만 한다 — 삭제하지 않음.
+
 raw_metrics/resource_age_seconds는 재생 데이터를 그대로 써서 나이가드/탐지
 판정을 유지한다.
-
-[2026-09-28 확인] zombie_live.py와 동일 — EC2 자동종료 블로커는 IAM 인스턴스
-프로파일 미부착으로 해소 확인됨.
 """
 
 from __future__ import annotations
@@ -32,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -42,7 +35,8 @@ if str(PLAYGROUND_ROOT) not in sys.path:
 
 import boto3
 
-from common import run_live_scenario, run_with_live_status_heartbeat
+from common import run_live_scenario
+import resources_manifest
 
 SOURCE_FILE = (
     Path(__file__).parent.parent
@@ -52,63 +46,79 @@ SOURCE_FILE = (
     / "ec2_over_20260928_170104.json"
 )
 
-# [2026-09-28 ADDED] zombie_live.py와 동일한 이유 — 매번 새 인스턴스라 --teardown이
-# 뭘 지울지 알려면 방금 만든 instance_id를 파일로 남겨둬야 한다.
-MANIFEST_PATH = Path(__file__).parent / ".ec2_over_live_manifest.json"
+NORMAL_INSTANCE_TYPE = "t3.small"
 
 
-def _launch_real_overprovisioned_instance() -> str:
-    from ec2_overprovision_setup import _launch_instances
-
-    ids = _launch_instances("anomaly", 1, "live-demo-ec2-over")
-    instance_id = ids[0]
+def _reset_to_normal(instance_id: str) -> None:
+    """오버프로비저닝 시나리오의 정상 상태 = t3.small, running
+    (Resize 액션으로 한 단계 다운사이즈됐으면 되돌린다)."""
     ec2 = boto3.client("ec2", region_name="ap-northeast-2")
-    ec2.get_waiter("instance_running").wait(InstanceIds=[instance_id])
-    print(f"[ec2_over_live] 실제 인스턴스 준비 완료: {instance_id}")
-    MANIFEST_PATH.write_text(
-        json.dumps({"instance_id": instance_id}, ensure_ascii=False), encoding="utf-8"
-    )
-    return instance_id
+    try:
+        inst = ec2.describe_instances(InstanceIds=[instance_id])["Reservations"][0][
+            "Instances"
+        ][0]
+        state = inst["State"]["Name"]
+        current_type = inst["InstanceType"]
 
-
-def teardown() -> None:
-    if not MANIFEST_PATH.exists():
-        print("[ec2_over_live] 매니페스트 없음 — 정리할 인스턴스 없음")
-        return
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    instance_id = manifest["instance_id"]
-    ec2 = boto3.client("ec2", region_name="ap-northeast-2")
-    ec2.terminate_instances(InstanceIds=[instance_id])
-    MANIFEST_PATH.unlink()
-    print(f"[ec2_over_live] 인스턴스 종료 요청 완료: {instance_id}")
+        if current_type != NORMAL_INSTANCE_TYPE:
+            if state in ("pending", "running"):
+                ec2.get_waiter("instance_running").wait(InstanceIds=[instance_id])
+                ec2.stop_instances(InstanceIds=[instance_id])
+                ec2.get_waiter("instance_stopped").wait(InstanceIds=[instance_id])
+            elif state == "stopping":
+                ec2.get_waiter("instance_stopped").wait(InstanceIds=[instance_id])
+            ec2.modify_instance_attribute(
+                InstanceId=instance_id,
+                InstanceType={"Value": NORMAL_INSTANCE_TYPE},
+            )
+            ec2.start_instances(InstanceIds=[instance_id])
+            ec2.get_waiter("instance_running").wait(InstanceIds=[instance_id])
+            print(
+                f"[ec2_over_live] 정상 상태로 리셋 완료"
+                f"({NORMAL_INSTANCE_TYPE}로 복원): {instance_id}"
+            )
+        elif state in ("stopped", "stopping"):
+            if state == "stopping":
+                ec2.get_waiter("instance_stopped").wait(InstanceIds=[instance_id])
+            ec2.start_instances(InstanceIds=[instance_id])
+            ec2.get_waiter("instance_running").wait(InstanceIds=[instance_id])
+            print(f"[ec2_over_live] 정상 상태로 리셋 완료(재시작): {instance_id}")
+    except Exception as exc:
+        print(f"[ec2_over_live] 리셋 실패: {exc}")
 
 
 def run() -> None:
     data = json.load(open(SOURCE_FILE, encoding="utf-8"))
+    real_resource_id = resources_manifest.read()["ec2_over_instance_id"]
 
-    # 인스턴스 생성(waiter 포함 수십 초)이 FRESHNESS_SECONDS(120초)를 넘으면
-    # 관리자 패널이 "실행 중"을 놓친다 — 백그라운드 스레드로 돌리면서 준비 중에도
-    # 주기적으로 상태를 갱신한다 (2026-09-30 발견).
-    real_resource_id = run_with_live_status_heartbeat(
-        _launch_real_overprovisioned_instance, None, "EC2"
-    )
-
-    run_live_scenario(
-        scenario_key="ec2_over",
-        resource_id=real_resource_id,
-        resource_type="EC2",
-        raw_metrics=data["raw_metrics"],
-        resource_age_seconds=data.get("resource_age_seconds"),
-    )
+    try:
+        run_live_scenario(
+            scenario_key="ec2_over",
+            resource_id=real_resource_id,
+            resource_type="EC2",
+            raw_metrics=data["raw_metrics"],
+            resource_age_seconds=data.get("resource_age_seconds"),
+        )
+    finally:
+        print(
+            f"[ec2_over_live] {resources_manifest.RESET_DELAY_SECONDS}초 후 정상 상태로 "
+            "리셋합니다 (콘솔 확인 시간)..."
+        )
+        time.sleep(resources_manifest.RESET_DELAY_SECONDS)
+        _reset_to_normal(real_resource_id)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--teardown", action="store_true")
+    parser.add_argument(
+        "--teardown",
+        action="store_true",
+        help="정상 상태로 리셋(삭제 아님) — demo_attack.py의 리셋 버튼도 이걸 호출",
+    )
     args = parser.parse_args()
 
     if args.teardown:
-        teardown()
+        _reset_to_normal(resources_manifest.read()["ec2_over_instance_id"])
     else:
         run()
 

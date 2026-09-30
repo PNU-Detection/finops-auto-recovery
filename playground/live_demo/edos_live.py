@@ -44,6 +44,12 @@ import boto3
 from autoscaling_edos_traffic_trial import AWS_REGION, setup_all, teardown_all
 
 from common import run_live_scenario, run_with_live_status_heartbeat
+import resources_manifest
+from pipeline.inbound_handlers import (
+    get_alb_arn_for_asg,
+    _find_existing_web_acl,
+    remove_waf_rate_based_rule,
+)
 
 SOURCE_FILE = (
     Path(__file__).parent.parent
@@ -54,12 +60,11 @@ SOURCE_FILE = (
 )
 
 
-# [2026-09-29 ADDED] 공용 실험 스크립트(autoscaling_edos_traffic_trial.py)는
-# CAPACITY=1로 MaxSize까지 고정해뒀다 — "트래픽 지표만 단독 검증"하려는 의도된
-# 설계라 실측 검증(real_demo)에는 그대로 둬야 한다. 하지만 그러면 decision_agent의
+# [2026-10-01] 예전엔 real_demo/edos_real.py와 리소스를 공유해서 "정상 상태 =
+# MaxSize 1(공용 실험 스크립트 기본값), 시연 때만 4로 임시 확장 후 복원"으로
+# 오갔는데, real_demo를 더 이상 쓰지 않기로 해서 그냥 4로 고정한다 — decision_agent의
 # EDoS 회피 비용 추정(_edos_avoided_scaling_cost, MaxSize-DesiredCapacity 기반)이
-# 항상 0으로 나와 시연 효과가 없다 — live_demo 전용으로만 여기서 MaxSize에 여유를
-# 둬서 "공격을 막아 확장을 회피했다"는 그림이 실제로 나오게 한다.
+# 항상 이 여유만큼 잡히게 하기 위한 값이라, 리셋 시에도 이 값으로 되돌린다(1이 아님).
 LIVE_DEMO_ASG_MAX_SIZE = 4
 
 
@@ -104,6 +109,37 @@ def _ensure_asg_exists(asg_name: str) -> None:
         time.sleep(_METRIC_WARMUP_SECONDS)
 
 
+def _reset_to_normal(asg_name: str) -> None:
+    """EDoS 시나리오의 정상 상태 = MaxSize가 LIVE_DEMO_ASG_MAX_SIZE(4)로 돌아가있고,
+    ALB에 WAF Rate-based Rule이 안 걸려있는 상태 (Web ACL 자체는 재연결
+    propagation 지연을 피하기 위해 ALB에 그대로 남겨둔다). ScaleDown 액션이
+    MaxSize를 낮췄을 수 있으므로 원래 값(4)으로 되돌린다."""
+    asg = boto3.client("autoscaling", region_name=AWS_REGION)
+    try:
+        asg.update_auto_scaling_group(
+            AutoScalingGroupName=asg_name, MaxSize=LIVE_DEMO_ASG_MAX_SIZE
+        )
+        print(f"[edos_live] MaxSize를 {LIVE_DEMO_ASG_MAX_SIZE}로 복원: {asg_name}")
+    except Exception as exc:
+        print(f"[edos_live] MaxSize 복원 실패: {exc}")
+
+    alb_arn = get_alb_arn_for_asg(asg_name)
+    if not alb_arn:
+        return
+    web_acl_name, web_acl_id = _find_existing_web_acl(alb_arn)
+    if not web_acl_name:
+        return
+    rule_name = f"rate-limit-{asg_name[:32]}"
+    result = remove_waf_rate_based_rule(
+        rule_name=rule_name,
+        web_acl_name=web_acl_name,
+        web_acl_id=web_acl_id,
+        delete_empty_acl=False,
+        dry_run=False,
+    )
+    print(f"[edos_live] WAF Rate-based Rule 제거: {result.get('status')}")
+
+
 def teardown() -> None:
     """⚠️ 이 ALB+ASG(detection-traffic-asg-anomaly-0)는 real_demo/edos_real.py와
     이름이 완전히 같아서 같은 리소스를 공유한다 — real_demo edos가 아직 돌고
@@ -123,22 +159,43 @@ def run() -> None:
         lambda: _ensure_asg_exists(resource_id), resource_id, "AutoScaling"
     )
 
-    run_live_scenario(
-        scenario_key="edos",
-        resource_id=resource_id,
-        resource_type="AutoScaling",
-        raw_metrics=data["raw_metrics"],
-        resource_age_seconds=data.get("resource_age_seconds"),
-    )
+    try:
+        run_live_scenario(
+            scenario_key="edos",
+            resource_id=resource_id,
+            resource_type="AutoScaling",
+            raw_metrics=data["raw_metrics"],
+            resource_age_seconds=data.get("resource_age_seconds"),
+        )
+    finally:
+        print(
+            f"[edos_live] {resources_manifest.RESET_DELAY_SECONDS}초 후 정상 상태로 "
+            "리셋합니다 (콘솔 확인 시간)..."
+        )
+        time.sleep(resources_manifest.RESET_DELAY_SECONDS)
+        _reset_to_normal(resource_id)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--teardown", action="store_true")
+    parser.add_argument(
+        "--teardown",
+        action="store_true",
+        help="정상 상태로 리셋(삭제 아님) — demo_attack.py의 리셋 버튼도 이걸 호출",
+    )
+    parser.add_argument(
+        "--full-teardown",
+        action="store_true",
+        help="ALB+ASG를 실제로 전부 삭제 (드묾 — real_demo/edos_real.py와 리소스를 "
+        "공유하므로 그쪽이 안 돌고 있을 때만 호출할 것)",
+    )
     args = parser.parse_args()
 
-    if args.teardown:
+    if args.full_teardown:
         teardown()
+    elif args.teardown:
+        data = json.load(open(SOURCE_FILE, encoding="utf-8"))
+        _reset_to_normal(data["resource_id"])
     else:
         run()
 

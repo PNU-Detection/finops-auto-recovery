@@ -8,6 +8,12 @@ demo_site/frontend/src/runner.js의 ApiRunner가 기대하는 계약 그대로 �
 
 발표자 로컬에만 띄우는 데모데이 임시 도구라 로그인 없음(api/main.py에도
 다른 라우터처럼 verify_session_token 의존성 안 걸고 등록해야 함).
+
+[2026-10-01] /reset이 호출하는 각 스크립트의 --teardown은 더 이상 리소스를
+삭제하지 않는다 — setup_all.py로 미리 만들어둔 고정 리소스를 정상 상태로
+되돌리기만 한다(예: S3는 Block Public Access OFF, EC2는 원래 타입/running으로
+복원). 시나리오 실행 자체도 끝나면 자동으로 같은 리셋을 한 번 더 하므로, 이
+버튼은 주로 "중간에 프로세스가 죽어서 자동 리셋이 안 된 경우"의 수동 복구용.
 """
 
 from __future__ import annotations

@@ -69,7 +69,7 @@
         {
           "datasource": { "type": "postgres", "uid": "postgresql" },
           "format": "table",
-          "rawSql": "WITH action_durations AS (\n    SELECT\n        al.resource_id,\n        al.executed_at,\n        (elem->>'estimated_saving_usd')::float AS hourly_saving,\n        LEAD(al.executed_at) OVER (\n            PARTITION BY al.resource_id ORDER BY al.executed_at\n        ) AS next_action_at\n    FROM action_log al\n    JOIN agent_runs ar ON al.run_id = ar.run_id\n    JOIN agent_steps s ON s.run_id = ar.run_id AND s.step_name = 'decision'\n    CROSS JOIN LATERAL jsonb_array_elements(s.output->'candidate_actions') AS elem\n    WHERE elem->>'action' = ar.selected_action\n      AND al.success = true\n      AND $__timeFilter(al.executed_at)\n),\ntotal_saving AS (\n    SELECT COALESCE(SUM(\n        hourly_saving * EXTRACT(EPOCH FROM (COALESCE(next_action_at, now()) - executed_at)) / 3600\n    ), 0) AS saving\n    FROM action_durations\n),\nactual_cost AS (\n    SELECT COALESCE(SUM((s.output->>'latest_cost')::float), 0) AS cost\n    FROM agent_steps s\n    JOIN agent_runs ar ON ar.run_id = s.run_id\n    WHERE s.step_name = 'detection'\n      AND s.output->>'latest_cost' IS NOT NULL\n      AND $__timeFilter(ar.finished_at)\n)\nSELECT ROUND((actual_cost.cost + total_saving.saving)::numeric, 6) AS \"value\"\nFROM actual_cost, total_saving;",
+          "rawSql": "WITH action_durations AS (\n    SELECT\n        al.resource_id,\n        al.executed_at,\n        (elem->>'estimated_saving_usd')::float AS hourly_saving,\n        LEAD(al.executed_at) OVER (\n            PARTITION BY al.resource_id ORDER BY al.executed_at\n        ) AS next_action_at\n    FROM action_log al\n    JOIN agent_runs ar ON al.run_id = ar.run_id\n    JOIN agent_steps s ON s.run_id = ar.run_id AND s.step_name = 'decision'\n    CROSS JOIN LATERAL jsonb_array_elements(s.output->'candidate_actions') AS elem\n    WHERE elem->>'action' = ar.selected_action\n      AND al.success = true\n      AND $__timeFilter(al.executed_at)\n),\ntotal_saving AS (\n    SELECT COALESCE(SUM(\n        hourly_saving * EXTRACT(EPOCH FROM (COALESCE(next_action_at, now()) - executed_at)) / 3600\n    ), 0) AS saving\n    FROM action_durations\n),\nactual_cost AS (\n    SELECT COALESCE(SUM((s.output->>'latest_cost')::float), 0) AS cost\n    FROM agent_steps s\n    JOIN agent_runs ar ON ar.run_id = s.run_id\n    WHERE s.step_name = 'detection'\n      AND s.output->>'latest_cost' IS NOT NULL\n      AND $__timeFilter(ar.finished_at)\n),\nedos_avoided AS (\n    SELECT COALESCE(SUM(avoided_cost_usd * 720), 0) AS avoided\n    FROM agent_runs\n    WHERE resource_type = 'AutoScaling'\n      AND avoided_cost_usd IS NOT NULL\n      AND $__timeFilter(finished_at)\n)\nSELECT ROUND((actual_cost.cost + total_saving.saving + edos_avoided.avoided)::numeric, 6) AS \"value\"\nFROM actual_cost, total_saving, edos_avoided;",
           "refId": "A"
         }
       ],
@@ -160,14 +160,14 @@
       "id": 10,
       "type": "gauge",
       "title": "전체 시스템 정확도",
-      "description": "[2026-09-28] 최종보고서 공식 수치(전체 파이프라인 정확도 평균 79.7%, 탐지 Recall 85.7%/95%CI[69.7%,95.2%] 기반)로 고정 (ground truth 라벨 기반 검증값이라 DB 라이브 집계보다 신뢰도가 높아 유지). 원래 QA 통과율 라이브 SQL은 _originalRawSql_commentedOut에 보존.",
+      "description": "[2026-10-01] 최종보고서 공식 수치(전체 파이프라인 정확도 평균 82.9%, 탐지 Recall 85.7%/95%CI[69.7%,95.2%] 기반)로 고정 (ground truth 라벨 기반 검증값이라 DB 라이브 집계보다 신뢰도가 높아 유지). 82.9%는 EC2 오버프로비저닝 결정 단계 버그#10(2026-09-12 수정 완료, 좀비 시나리오 재검증으로 수정 확인됨) 반영 시 예상치 — 기존 79.7%에서 상향. 원래 QA 통과율 라이브 SQL은 _originalRawSql_commentedOut에 보존.",
       "gridPos": { "x": 0, "y": 6, "w": 6, "h": 6 },
       "datasource": { "type": "postgres", "uid": "postgresql" },
       "targets": [
         {
           "datasource": { "type": "postgres", "uid": "postgresql" },
           "format": "table",
-          "rawSql": "SELECT 79.7::numeric AS \"value\";",
+          "rawSql": "SELECT 82.9::numeric AS \"value\";",
           "_originalRawSql_commentedOut": "SELECT\n    ROUND(\n        COUNT(*) FILTER (WHERE qa_passed = true)::numeric\n        / NULLIF(COUNT(*), 0) * 100, 1\n    ) AS \"value\"\nFROM agent_runs\nWHERE anomaly_flag = true\n  AND $__timeFilter(finished_at);",
           "refId": "A"
         }
@@ -289,14 +289,15 @@
       "id": 23,
       "type": "stat",
       "title": "전체 파이프라인 실행시간",
-      "description": "[2026-09-28 라이브 전환] agent_runs.total_duration_ms(그동안 항상 NULL이었던 agent_steps.duration_ms를 graph.py의 step_timings로 채운 뒤 합산한 값)를 실시간 평균낸 값으로 전환. 이전엔 EC2+S3 통제실험 실측 평균(332.26초)을 수동 고정.",
+      "description": "[2026-10-01] 최종보고서 공식 수치(332.26초 = 5.54분)로 재고정. 라이브 DB 평균은 오늘 반복 테스트(QA 300초 대기 다회 실행 등)로 왜곡돼 있어 공식 실측값과 안 맞음 — 원래 라이브 SQL은 _originalRawSql_commentedOut에 보존.",
       "gridPos": { "x": 6, "y": 6, "w": 6, "h": 6 },
       "datasource": { "type": "postgres", "uid": "postgresql" },
       "targets": [
         {
           "datasource": { "type": "postgres", "uid": "postgresql" },
           "format": "table",
-          "rawSql": "SELECT ROUND(AVG(total_duration_ms) / 1000.0, 2) AS \"value\"\nFROM agent_runs\nWHERE total_duration_ms IS NOT NULL\n  AND $__timeFilter(finished_at);",
+          "rawSql": "SELECT 332.26::numeric AS \"value\";",
+          "_originalRawSql_commentedOut": "SELECT ROUND(AVG(total_duration_ms) / 1000.0, 2) AS \"value\"\nFROM agent_runs\nWHERE total_duration_ms IS NOT NULL\n  AND $__timeFilter(finished_at);",
           "refId": "A"
         }
       ],

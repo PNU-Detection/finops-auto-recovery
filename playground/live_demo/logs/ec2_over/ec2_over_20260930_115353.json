@@ -1,0 +1,35 @@
+{
+  "scenario_key": "ec2_over",
+  "resource_id": "i-0476dd942c831b877",
+  "resource_type": "EC2",
+  "run_started_at": "2026-09-30T11:53:53.242813+00:00",
+  "run_ended_at": "2026-09-30T11:59:46.311791+00:00",
+  "elapsed_seconds_total": 353.07,
+  "step_timings_ms": {
+    "detection": 27,
+    "classification": 12441,
+    "decision": 393,
+    "action": 17602,
+    "qa": 300905
+  },
+  "estimated_cost_usd": 0.013,
+  "anomaly_flag": true,
+  "anomaly_score_zscore": 0.5816,
+  "anomaly_score_iforest": 0.0456,
+  "triggered_metrics": [
+    "cpu_utilization",
+    "network_in",
+    "network_out"
+  ],
+  "ec2_utilization_band": "overprovisioned",
+  "anomaly_type": "cost_inefficiency",
+  "selected_action": "Resize",
+  "risk_level": "MED",
+  "requires_approval": false,
+  "action_result": {
+    "status": "success",
+    "new_instance_type": "t3.micro"
+  },
+  "qa_passed": true,
+  "rollback_count": 0
+}

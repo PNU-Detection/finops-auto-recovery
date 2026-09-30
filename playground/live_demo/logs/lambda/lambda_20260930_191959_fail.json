@@ -1,0 +1,30 @@
+{
+  "scenario_key": "lambda",
+  "resource_id": "detection-test-lambda-throttle-demo",
+  "resource_type": "Lambda",
+  "run_started_at": "2026-09-30T19:19:59.646944+00:00",
+  "run_ended_at": "2026-09-30T19:20:19.897529+00:00",
+  "elapsed_seconds_total": 20.25,
+  "step_timings_ms": {
+    "detection": 8051,
+    "classification": 11,
+    "decision": 52,
+    "action": 0,
+    "qa": 221
+  },
+  "estimated_cost_usd": 6.689855072205625e-05,
+  "anomaly_flag": true,
+  "anomaly_score_zscore": 2.1049,
+  "anomaly_score_iforest": 0.9787,
+  "triggered_metrics": [],
+  "ec2_utilization_band": null,
+  "anomaly_type": "cost_spike",
+  "selected_action": "NoAction",
+  "risk_level": "MED",
+  "requires_approval": false,
+  "action_result": {
+    "status": "skipped"
+  },
+  "qa_passed": true,
+  "rollback_count": 0
+}

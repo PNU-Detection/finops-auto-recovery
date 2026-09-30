@@ -12,20 +12,15 @@ EC2 좀비(완전 유휴) 시나리오 실시간 데모.
        오늘 모델 재학습 이후 네트워크 I/O가 임계값을 살짝 넘어 좀비 판정이 안 됨
        — raw_metrics 자체가 유효한 최신 성공 사례로 교체함.)
 
-⚠️ 2026-09-27 발견(s3_live.py 등과 동일한 문제): 이 raw_metrics는 다른(예전) 계정/
-실행에서 실측된 데이터라 그 안의 resource_id(인스턴스 ID)가 지금 이 프로세스가
-보는 계정엔 없다 — action_node의 stop_instances가 InvalidInstanceID.NotFound로
-죽는다. 그래서 지금 계정에 실제 EC2 인스턴스를 하나 새로 띄우고, **그 실제
-instance_id로 resource_id를 바꿔치기**해서 action이 걸릴 진짜 대상이 있게 한다.
-raw_metrics/resource_age_seconds는 그대로 재생 데이터를 쓴다 — 새 인스턴스의
-진짜 나이(방금 떠서 2.5시간 나이가드 미달)를 쓰면 EC2 유휴 판정 자체가
-보류되므로, 재생된(가드 통과하는) 나이값을 유지해야 한다.
+[2026-10-01 변경] 예전엔 실행할 때마다 새 EC2 인스턴스를 띄우고 --teardown으로
+지웠는데, 이러면 (1) 매번 인스턴스 생성 대기가 끼고 (2) 중간에 실패하면 고아
+인스턴스가 쌓였다. setup_all.py가 미리 만들어둔 고정 인스턴스를
+resources_manifest에서 읽어 재사용하고, 시나리오가 끝나면(성공/실패 무관)
+정상 상태(running)로 리셋만 한다 — 삭제하지 않음.
 
-[2026-09-28 확인] 예전엔 "EC2 인스턴스가 20초~8분 내 원인불명으로 자동종료"되는
-블로커가 있어 실행 검증을 보류했었는데, IAM 인스턴스 프로파일을 붙이지 않고
-띄우면(_launch_instances가 이미 그렇게 함) 종료되지 않는다는 게 실측으로
-확인됐다(이 계정의 보안 자동화가 IAM 역할 붙은 EC2만 타겟하는 것으로 추정).
-실제로 이 스크립트를 돌려 인스턴스가 끝까지 살아있음을 확인함 — 블로커 해소.
+raw_metrics/resource_age_seconds는 그대로 재생 데이터를 쓴다 — 재사용 인스턴스의
+진짜 나이를 쓰면 EC2 유휴 판정 자체가 보류되므로, 재생된(가드 통과하는) 나이값을
+유지해야 한다.
 """
 
 from __future__ import annotations
@@ -33,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -43,7 +39,8 @@ if str(PLAYGROUND_ROOT) not in sys.path:
 
 import boto3
 
-from common import run_live_scenario, run_with_live_status_heartbeat
+from common import run_live_scenario
+import resources_manifest
 
 SOURCE_FILE = (
     Path(__file__).parent.parent
@@ -53,63 +50,57 @@ SOURCE_FILE = (
     / "zombie_20260928_134904.json"
 )
 
-# [2026-09-28 ADDED] 매번 새 인스턴스를 띄우기 때문에(고정된 리소스 이름이 아님)
-# --teardown이 뭘 지울지 알려면 방금 만든 instance_id를 파일로 남겨둬야 한다.
-MANIFEST_PATH = Path(__file__).parent / ".zombie_live_manifest.json"
 
-
-def _launch_real_zombie_instance() -> str:
-    from ec2_overprovision_setup import _launch_instances
-
-    ids = _launch_instances("anomaly", 1, "live-demo-zombie")
-    instance_id = ids[0]
+def _reset_to_normal(instance_id: str) -> None:
+    """좀비 시나리오의 정상 상태 = 인스턴스가 running (Stop 액션으로 꺼졌으면 재시작)."""
     ec2 = boto3.client("ec2", region_name="ap-northeast-2")
-    ec2.get_waiter("instance_running").wait(InstanceIds=[instance_id])
-    print(f"[zombie_live] 실제 인스턴스 준비 완료(방치 상태): {instance_id}")
-    MANIFEST_PATH.write_text(
-        json.dumps({"instance_id": instance_id}, ensure_ascii=False), encoding="utf-8"
-    )
-    return instance_id
-
-
-def teardown() -> None:
-    if not MANIFEST_PATH.exists():
-        print("[zombie_live] 매니페스트 없음 — 정리할 인스턴스 없음")
-        return
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    instance_id = manifest["instance_id"]
-    ec2 = boto3.client("ec2", region_name="ap-northeast-2")
-    ec2.terminate_instances(InstanceIds=[instance_id])
-    MANIFEST_PATH.unlink()
-    print(f"[zombie_live] 인스턴스 종료 요청 완료: {instance_id}")
+    try:
+        state = ec2.describe_instances(InstanceIds=[instance_id])["Reservations"][0][
+            "Instances"
+        ][0]["State"]["Name"]
+        if state == "stopping":
+            ec2.get_waiter("instance_stopped").wait(InstanceIds=[instance_id])
+            state = "stopped"
+        if state == "stopped":
+            ec2.start_instances(InstanceIds=[instance_id])
+            ec2.get_waiter("instance_running").wait(InstanceIds=[instance_id])
+            print(f"[zombie_live] 정상 상태로 리셋 완료(재시작): {instance_id}")
+    except Exception as exc:
+        print(f"[zombie_live] 리셋 실패: {exc}")
 
 
 def run() -> None:
     data = json.load(open(SOURCE_FILE, encoding="utf-8"))
+    real_resource_id = resources_manifest.read()["zombie_instance_id"]
 
-    # 인스턴스 생성(waiter 포함 수십 초)이 FRESHNESS_SECONDS(120초)를 넘으면
-    # 관리자 패널이 "실행 중"을 놓친다 — 백그라운드 스레드로 돌리면서 준비 중에도
-    # 주기적으로 상태를 갱신한다 (2026-09-30 발견).
-    real_resource_id = run_with_live_status_heartbeat(
-        _launch_real_zombie_instance, None, "EC2"
-    )
-
-    run_live_scenario(
-        scenario_key="zombie",
-        resource_id=real_resource_id,
-        resource_type="EC2",
-        raw_metrics=data["raw_metrics"],
-        resource_age_seconds=data.get("resource_age_seconds"),
-    )
+    try:
+        run_live_scenario(
+            scenario_key="zombie",
+            resource_id=real_resource_id,
+            resource_type="EC2",
+            raw_metrics=data["raw_metrics"],
+            resource_age_seconds=data.get("resource_age_seconds"),
+        )
+    finally:
+        print(
+            f"[zombie_live] {resources_manifest.RESET_DELAY_SECONDS}초 후 정상 상태로 "
+            "리셋합니다 (콘솔 확인 시간)..."
+        )
+        time.sleep(resources_manifest.RESET_DELAY_SECONDS)
+        _reset_to_normal(real_resource_id)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--teardown", action="store_true")
+    parser.add_argument(
+        "--teardown",
+        action="store_true",
+        help="정상 상태로 리셋(삭제 아님) — demo_attack.py의 리셋 버튼도 이걸 호출",
+    )
     args = parser.parse_args()
 
     if args.teardown:
-        teardown()
+        _reset_to_normal(resources_manifest.read()["zombie_instance_id"])
     else:
         run()
 

@@ -17,15 +17,6 @@ const NODE_COLOR = {
   error: "#e0654f",
 };
 
-function formatAsOf(isoString) {
-  if (!isoString) return null;
-  const d = new Date(isoString);
-  if (Number.isNaN(d.getTime())) return null;
-  const pad = (n) => String(n).padStart(2, "0");
-  const yy = String(d.getFullYear()).slice(-2);
-  return `${yy}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
 function StatCard({ label, value, accent, onClick, tooltip }) {
   return (
     <div
@@ -91,8 +82,7 @@ export default function Dashboard({ status, loading, recentDetections, onNavigat
     return <div style={{ color: colors.subtext }}>불러오는 중...</div>;
   }
 
-  const { stats, nodes, pipeline_running, as_of } = status;
-  const asOfLabel = formatAsOf(as_of);
+  const { stats, nodes } = status;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -134,15 +124,8 @@ export default function Dashboard({ status, loading, recentDetections, onNavigat
       </div>
 
       <div style={card()}>
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 22 }}>
-          <div style={{ ...labelStyle, color: colors.subtext }}>
-            파이프라인 에이전트 상태
-          </div>
-          {asOfLabel && (
-            <div style={{ fontFamily: font.mono, fontSize: 11, color: colors.subtext }}>
-              {pipeline_running ? `${asOfLabel} 기준` : `${asOfLabel} 기준 (마지막 실행)`}
-            </div>
-          )}
+        <div style={{ ...labelStyle, color: colors.subtext, marginBottom: 22 }}>
+          파이프라인 에이전트 상태
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {NODE_LABELS.map((node, idx) => (

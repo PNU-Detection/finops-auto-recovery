@@ -16,6 +16,7 @@ from fastapi import APIRouter
 
 from api import graph_runtime
 from api.pg import connection_params
+from pipeline.live_events import display_action_label
 
 router = APIRouter(prefix="/recent-detections", tags=["recent"])
 
@@ -48,11 +49,19 @@ def _pending_items() -> list[dict]:
                 estimated_saving = candidate.get("estimated_saving_usd", 0.0)
                 break
 
+        # ScaleDown(EDoS)은 candidate_actions의 saving이 cost 지표(desired_capacity
+        # 기반) 트렌드로만 계산돼서 공격 중에도 거의 항상 0으로 나온다 — 0이고
+        # avoided_cost_usd(회피 비용)가 있으면 그걸 대신 쓴다. approvals.py의
+        # _to_queue_item()과 동일한 폴백 (2026-10-01 발견, 대시보드 "최근 탐지"에도
+        # 반영 안 돼있었음).
+        if estimated_saving <= 0 and interrupt.get("avoided_cost_usd"):
+            estimated_saving = interrupt["avoided_cost_usd"]
+
         items.append(
             {
                 "id": pending["thread_id"],
                 "severity": interrupt.get("risk_level"),
-                "action": selected_action,
+                "action": display_action_label(selected_action),
                 "resource_type": interrupt.get("resource_type"),
                 "resource_id": interrupt.get("resource_id"),
                 "timestamp": pending["created_at"],
@@ -77,7 +86,7 @@ def _finished_items(limit: int) -> list[dict]:
             cur.execute(
                 """
                 SELECT resource_id, resource_type, selected_action, risk_level, status,
-                       finished_at, estimated_saving_usd
+                       finished_at, estimated_saving_usd, avoided_cost_usd
                 FROM agent_runs
                 WHERE anomaly_flag = true
                 ORDER BY finished_at DESC
@@ -91,13 +100,22 @@ def _finished_items(limit: int) -> list[dict]:
 
     items = []
     for row in rows:
-        saving = row.get("estimated_saving_usd")
+        # ScaleDown(EDoS)은 estimated_saving_usd가 거의 항상 0이라 avoided_cost_usd로
+        # 대체한다 — _pending_items()와 동일한 폴백 (2026-10-01).
+        # NoAction은 실제로 아무것도 안 바꿨으니 avoided_cost_usd(공격을 막았다면
+        # 가정한 회피 비용) 같은 추정치가 남아있어도 "비용 절감"으로 보여주면 안 된다
+        # (2026-10-01 발견, NoAction 항목에 $0.000036/hr이 잘못 표시되던 버그).
+        saving = (
+            0.0
+            if row["selected_action"] == "NoAction"
+            else row.get("estimated_saving_usd") or row.get("avoided_cost_usd")
+        )
         if row["status"] != "completed":
             display = {"type": "status", "value": "실패"}
         elif saving:
             display = {
                 "type": "status",
-                "value": f"조치 완료 (예상 절감 ${_format_usd_per_hour(saving)}/hr)",
+                "value": f"조치 완료 (비용 절감 ${_format_usd_per_hour(saving)}/hr)",
             }
         else:
             display = {"type": "status", "value": "조치 완료"}
@@ -105,7 +123,7 @@ def _finished_items(limit: int) -> list[dict]:
             {
                 "id": f"run-{row['resource_id']}-{row['finished_at'].isoformat()}",
                 "severity": row["risk_level"],
-                "action": row["selected_action"],
+                "action": display_action_label(row["selected_action"]),
                 "resource_type": row["resource_type"],
                 "resource_id": row["resource_id"],
                 "timestamp": row["finished_at"].isoformat(),

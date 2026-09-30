@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -35,6 +36,7 @@ import boto3
 from s3_repeated_trial import AWS_REGION, _ensure_bucket_with_metrics
 
 from common import run_live_scenario, run_with_live_status_heartbeat
+import resources_manifest
 
 SOURCE_FILE = (
     Path(__file__).parent.parent / "team_results" / "s3" / "repeated_trial.json"
@@ -44,6 +46,28 @@ SOURCE_FILE = (
 def _resource_id() -> str:
     data = json.load(open(SOURCE_FILE, encoding="utf-8"))
     return data["anomaly_trials"][0]["after"]["resource_id"]
+
+
+def _reset_to_normal(resource_id: str) -> None:
+    """S3 대량다운로드 시나리오의 정상 상태 = Block Public Access 전부 OFF
+    (BPA는 AWS 기본값이 이미 ON이라, 켜져있으면 Block 액션 전후 변화가
+    안 보인다 — 2026-09-30 발견)."""
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    try:
+        s3.put_public_access_block(
+            Bucket=resource_id,
+            PublicAccessBlockConfiguration={
+                "BlockPublicAcls": False,
+                "IgnorePublicAcls": False,
+                "BlockPublicPolicy": False,
+                "RestrictPublicBuckets": False,
+            },
+        )
+        print(
+            f"[s3_live] 정상 상태로 리셋 완료(Block Public Access OFF): {resource_id}"
+        )
+    except Exception as exc:
+        print(f"[s3_live] 리셋 실패: {exc}")
 
 
 def teardown() -> None:
@@ -78,22 +102,39 @@ def run() -> None:
     # 갱신한다 (2026-09-30 발견).
     run_with_live_status_heartbeat(_prepare_bucket, resource_id, "S3")
 
-    run_live_scenario(
-        scenario_key="s3",
-        resource_id=resource_id,
-        resource_type="S3",
-        raw_metrics=after["raw_metrics"],
-        resource_age_seconds=None,
-    )
+    try:
+        run_live_scenario(
+            scenario_key="s3",
+            resource_id=resource_id,
+            resource_type="S3",
+            raw_metrics=after["raw_metrics"],
+            resource_age_seconds=None,
+        )
+    finally:
+        print(
+            f"[s3_live] {resources_manifest.RESET_DELAY_SECONDS}초 후 정상 상태로 "
+            "리셋합니다 (콘솔 확인 시간)..."
+        )
+        time.sleep(resources_manifest.RESET_DELAY_SECONDS)
+        _reset_to_normal(resource_id)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--teardown", action="store_true")
+    parser.add_argument(
+        "--teardown",
+        action="store_true",
+        help="정상 상태로 리셋(삭제 아님) — demo_attack.py의 리셋 버튼도 이걸 호출",
+    )
+    parser.add_argument(
+        "--full-teardown", action="store_true", help="S3 버킷을 실제로 삭제"
+    )
     args = parser.parse_args()
 
-    if args.teardown:
+    if args.full_teardown:
         teardown()
+    elif args.teardown:
+        _reset_to_normal(_resource_id())
     else:
         run()
 

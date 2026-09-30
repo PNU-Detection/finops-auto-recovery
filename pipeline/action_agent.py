@@ -47,6 +47,12 @@ DEFAULT_LAMBDA_THROTTLE_LIMIT = 5
 
 # AutoScaling ScaleDown 시 축소할 최대 인스턴스 수 기본값
 DEFAULT_ASG_SCALEDOWN_MAX_SIZE = 2
+# [2026-10-01] ScaleDown 시 실제 가동 대수(DesiredCapacity) 목표값 — MaxSize와
+# 분리했다. 기존엔 둘 다 같은 값(target_capacity)으로 묶여있어서, 평소
+# DesiredCapacity(1)가 이미 목표치(2)보다 작아 실제 인스턴스 수가 안 줄어드는
+# 것처럼 보였다(콘솔에서 조치 전후 차이가 안 보임) — 데모 시연 시 "정상
+# Desired=2 -> 조치 후 Desired=1"로 실제 인스턴스 감소가 눈에 보이게 한다.
+DEFAULT_ASG_SCALEDOWN_DESIRED = 1
 
 ACTION_EXECUTION_LOG_PATH = os.path.join(
     os.path.dirname(__file__), "..", "schema", "logs", "action_execution_log.jsonl"
@@ -281,12 +287,14 @@ def _execute_lambda_throttle(
 def _execute_autoscaling_scaledown(
     resource_id: str,
     max_size: int = DEFAULT_ASG_SCALEDOWN_MAX_SIZE,
+    target_desired: int = DEFAULT_ASG_SCALEDOWN_DESIRED,
     apply_waf: bool = False,
     waf_rate_limit: int = 2000,
     dry_run: bool = False,
 ) -> dict:
     """
     입력: resource_id (AutoScaling 그룹명), max_size (축소할 최대 인스턴스 수, 기본 2),
+          target_desired (축소할 실제 가동 대수, 기본 1 — max_size와 별개 값),
           apply_waf (연결된 ALB에 WAF Rate-based Rule 적용 여부),
           waf_rate_limit (WAF 제한, 5분간 요청 수),
           dry_run (실제 API 호출 없이 계획만 반환)
@@ -302,6 +310,7 @@ def _execute_autoscaling_scaledown(
         return scale_down_with_rate_limit(
             auto_scaling_group_name=resource_id,
             target_capacity=max_size,
+            target_desired=target_desired,
             associated_alb_arn=alb_arn,
             waf_rate_limit=waf_rate_limit,
             dry_run=dry_run,
@@ -314,7 +323,7 @@ def _execute_autoscaling_scaledown(
             AutoScalingGroupNames=[resource_id]
         )
         current_desired = current["AutoScalingGroups"][0]["DesiredCapacity"]
-        new_desired = min(current_desired, max_size)
+        new_desired = min(current_desired, target_desired)
 
         asg_client.update_auto_scaling_group(
             AutoScalingGroupName=resource_id,

@@ -50,18 +50,33 @@ CREATE TABLE IF NOT EXISTS pipeline_events (
     requires_approval     BOOLEAN,
     qa_passed             BOOLEAN,
     rollback_count        INTEGER,
+    rejected              BOOLEAN DEFAULT FALSE,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
+
+# approval_gate.py가 거부 시 decision_reasoning에 붙이는 마커 (그대로 문자열 매칭)
+_REJECTED_MARKER = "관리자 거부"
 
 
 def _ensure_table(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(_CREATE_TABLE_SQL)
+        # 기존에 이미 만들어진 테이블에는 CREATE TABLE IF NOT EXISTS가 컬럼을
+        # 추가해주지 않으므로 별도로 보강 (2026-10-01, rejected 컬럼 신규 추가).
+        cur.execute(
+            "ALTER TABLE pipeline_events ADD COLUMN IF NOT EXISTS rejected BOOLEAN DEFAULT FALSE;"
+        )
     conn.commit()
 
 
 def _emit(event_type: str, state: PipelineState) -> None:
+    # 승인 거부되면 approval_gate.py가 selected_action="NoAction"으로 바꿔버려서,
+    # decision_reasoning의 마커 문자열로만 "원래 조치가 필요했는데 사람이 거부한
+    # 것"과 "애초에 조치가 필요 없었던 것"을 구분할 수 있다 — 구분 안 하면 거부해도
+    # "정상 범위로 판단되어 지켜봅니다"라는 사실과 다른 토스트가 뜬다(2026-10-01 발견).
+    rejected = _REJECTED_MARKER in (state.get("decision_reasoning") or "")
+
     try:
         conn = _get_conn()
         try:
@@ -72,8 +87,8 @@ def _emit(event_type: str, state: PipelineState) -> None:
                     INSERT INTO pipeline_events
                         (event_type, resource_id, resource_type, anomaly_type,
                          ec2_utilization_band, selected_action, risk_level,
-                         requires_approval, qa_passed, rollback_count)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         requires_approval, qa_passed, rollback_count, rejected)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         event_type,
@@ -86,6 +101,7 @@ def _emit(event_type: str, state: PipelineState) -> None:
                         state.get("requires_approval"),
                         state.get("qa_passed"),
                         state.get("rollback_count"),
+                        rejected,
                     ),
                 )
             conn.commit()
@@ -140,6 +156,18 @@ _ACTION_LABELS = {
 
 def action_label(selected_action: Optional[str]) -> str:
     return _ACTION_LABELS.get(selected_action or "", selected_action or "조치")
+
+
+# 대시보드 "최근 탐지"/승인 대기 목록에 그대로 노출되는 액션명 — ScaleDown은
+# AWS API 용어라 일반 사용자에게 안 와닿아서 표시용으로만 바꾼다(내부 로직/DB
+# 값은 그대로 "ScaleDown" 유지).
+_DISPLAY_ACTION_LABELS = {
+    "ScaleDown": "Scale In",
+}
+
+
+def display_action_label(selected_action: Optional[str]) -> str:
+    return _DISPLAY_ACTION_LABELS.get(selected_action or "", selected_action or "")
 
 
 _COMPLETION_ACTION_LABELS = {

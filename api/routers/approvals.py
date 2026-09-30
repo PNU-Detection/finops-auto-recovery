@@ -24,6 +24,7 @@ from langgraph.types import Command
 from api import graph_runtime
 from pipeline.checkpointer import get_postgres_checkpointer
 from pipeline.graph import build_approval_graph
+from pipeline.live_events import display_action_label
 
 router = APIRouter(prefix="/queue", tags=["approvals"])
 logger = logging.getLogger("api.approvals")
@@ -50,7 +51,7 @@ def _to_queue_item(pending: dict) -> dict:
     return {
         "id": pending["thread_id"],
         "severity": interrupt.get("risk_level"),
-        "action": selected_action,
+        "action": display_action_label(selected_action),
         "resource_type": interrupt.get("resource_type"),
         "resource_id": interrupt.get("resource_id"),
         "timestamp": pending["created_at"],

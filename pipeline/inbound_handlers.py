@@ -45,7 +45,8 @@ logger = logging.getLogger(__name__)
 # 기본값 상수
 DEFAULT_WAF_RATE_LIMIT = 2000  # 5분간 최대 요청 수 (AWS 최소값은 100)
 DEFAULT_LAMBDA_THROTTLE_LIMIT = 0  # 동시성 0 = 완전 차단
-DEFAULT_ASG_SCALEDOWN_CAPACITY = 2  # 스케일다운 목표 용량
+DEFAULT_ASG_SCALEDOWN_CAPACITY = 2  # 스케일다운 목표 MaxSize
+DEFAULT_ASG_SCALEDOWN_DESIRED = 1  # 스케일다운 목표 DesiredCapacity (MaxSize와 별개)
 MAX_WAF_RETRY = 2  # WAFOptimisticLockException 재시도 횟수
 
 # AssociateWebACL은 ALB가 막 생성된 직후(수 분 이내)에 호출하면 WAF 쪽 리소스
@@ -498,6 +499,7 @@ def _find_existing_web_acl(resource_arn: str) -> tuple[str | None, str | None]:
 def scale_down_with_rate_limit(
     auto_scaling_group_name: str,
     target_capacity: int = DEFAULT_ASG_SCALEDOWN_CAPACITY,
+    target_desired: int = DEFAULT_ASG_SCALEDOWN_DESIRED,
     associated_alb_arn: str | None = None,
     waf_rate_limit: int = DEFAULT_WAF_RATE_LIMIT,
     waf_rule_name: str | None = None,
@@ -512,7 +514,9 @@ def scale_down_with_rate_limit(
 
     Args:
         auto_scaling_group_name: AutoScaling 그룹 이름
-        target_capacity: 목표 인스턴스 수 (max_size와 desired_capacity를 이 값으로 설정)
+        target_capacity: 목표 MaxSize
+        target_desired: 목표 DesiredCapacity (현재값보다 클 땐 안 올림, target_capacity와
+            별개 값 — 2026-10-01부터 분리, 기본값은 둘 다 기존과 동일하게 동작)
         associated_alb_arn: 연결된 ALB ARN (있으면 WAF Rule도 적용)
         waf_rate_limit: WAF Rate-based Rule 제한 (5분간 요청 수)
         waf_rule_name: WAF Rule 이름 (없으면 자동 생성)
@@ -527,6 +531,7 @@ def scale_down_with_rate_limit(
     result_info = {
         "auto_scaling_group_name": auto_scaling_group_name,
         "target_capacity": target_capacity,
+        "target_desired": target_desired,
         "associated_alb_arn": associated_alb_arn,
         "waf_rate_limit": waf_rate_limit,
         "waf_rule_name": waf_rule_name,
@@ -552,7 +557,7 @@ def scale_down_with_rate_limit(
 
     # 1. AutoScaling ScaleDown
     scaledown_result = _execute_autoscaling_scaledown_internal(
-        asg_client, auto_scaling_group_name, target_capacity
+        asg_client, auto_scaling_group_name, target_capacity, target_desired
     )
 
     # 2. WAF Rate-based Rule 적용 (ALB가 있는 경우)
@@ -590,7 +595,7 @@ def scale_down_with_rate_limit(
 
 
 def _execute_autoscaling_scaledown_internal(
-    asg_client, group_name: str, target_capacity: int
+    asg_client, group_name: str, target_capacity: int, target_desired: int
 ) -> dict:
     """AutoScaling 그룹 스케일다운 내부 구현."""
     try:
@@ -605,8 +610,8 @@ def _execute_autoscaling_scaledown_internal(
         previous_max = group["MaxSize"]
         previous_desired = group["DesiredCapacity"]
 
-        # 새 desired는 target_capacity와 현재 중 작은 값
-        new_desired = min(previous_desired, target_capacity)
+        # 새 desired는 target_desired와 현재 중 작은 값 (이미 더 낮으면 안 올림)
+        new_desired = min(previous_desired, target_desired)
 
         asg_client.update_auto_scaling_group(
             AutoScalingGroupName=group_name,

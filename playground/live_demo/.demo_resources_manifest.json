@@ -1,0 +1,7 @@
+{
+  "zombie_instance_id": "i-04e0606aab73faf2b",
+  "ec2_over_instance_id": "i-0a7e617b6d9076eeb",
+  "lambda_function_name": "detection-test-lambda-throttle-demo",
+  "s3_bucket_name": "detection-trial-anomaly-0",
+  "asg_name": "detection-traffic-asg-anomaly-0"
+}

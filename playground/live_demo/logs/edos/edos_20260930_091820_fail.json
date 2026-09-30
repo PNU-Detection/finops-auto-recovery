@@ -1,0 +1,59 @@
+{
+  "scenario_key": "edos",
+  "resource_id": "detection-traffic-asg-anomaly-0",
+  "resource_type": "AutoScaling",
+  "run_started_at": "2026-09-30T09:18:20.250593+00:00",
+  "run_ended_at": "2026-09-30T09:24:49.587768+00:00",
+  "elapsed_seconds_total": 389.34,
+  "step_timings_ms": {
+    "detection": 9165,
+    "classification": 46,
+    "decision": 508,
+    "action": 43856,
+    "qa": 315537
+  },
+  "estimated_cost_usd": 0.0,
+  "anomaly_flag": true,
+  "anomaly_score_zscore": 1.2554,
+  "anomaly_score_iforest": 1.0,
+  "triggered_metrics": [],
+  "ec2_utilization_band": null,
+  "anomaly_type": "risk_security",
+  "selected_action": "ScaleDown",
+  "risk_level": "HIGH",
+  "requires_approval": false,
+  "action_result": {
+    "status": "success",
+    "scaledown_result": {
+      "status": "success",
+      "previous_max_size": 4,
+      "previous_desired_capacity": 1,
+      "new_max_size": 2,
+      "new_desired_capacity": 1
+    },
+    "waf_result": {
+      "status": "success",
+      "created_web_acl": true,
+      "web_acl_name": "auto-rate-limit-1790759931",
+      "web_acl_id": "7cc07b34-5071-4231-a052-8ac19299eaa8",
+      "web_acl_arn": "arn:aws:wafv2:ap-northeast-2:931253429326:regional/webacl/auto-rate-limit-1790759931/7cc07b34-5071-4231-a052-8ac19299eaa8",
+      "resource_arn": "arn:aws:elasticloadbalancing:ap-northeast-2:931253429326:loadbalancer/app/detection-traffic-alb/e617f90fd6a8da4d",
+      "rule_name": "rate-limit-detection-traffic-asg-anomaly-0",
+      "limit": 2000
+    },
+    "auto_scaling_group_name": "detection-traffic-asg-anomaly-0",
+    "target_capacity": 2,
+    "associated_alb_arn": "arn:aws:elasticloadbalancing:ap-northeast-2:931253429326:loadbalancer/app/detection-traffic-alb/e617f90fd6a8da4d",
+    "waf_rate_limit": 2000,
+    "waf_rule_name": "rate-limit-detection-traffic-asg-anomaly-0",
+    "rolled_back": true,
+    "rollback_status": "success",
+    "rollback_detail": {
+      "status": "success"
+    },
+    "rollback_reason": "[LLM] 액션은 성공적으로 완료되었으나, 현재 지표상 인스턴스가 0개로 서비스 가용성 SLA를 위반했습니다. 이는 심각한 서비스 중단 상황입니다.",
+    "rollback_attempt": 1
+  },
+  "qa_passed": false,
+  "rollback_count": 1
+}

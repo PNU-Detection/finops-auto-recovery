@@ -23,7 +23,9 @@ def _build_message(row: dict) -> dict:
             text = f"{scenario}! 자동으로 {action}합니다"
     else:
         if row["qa_passed"]:
-            if row["selected_action"] == "NoAction":
+            if row.get("rejected"):
+                text = "조치를 거부하여 진행하지 않았습니다"
+            elif row["selected_action"] == "NoAction":
                 text = "정상 범위로 판단되어 추가 조치 없이 지켜봅니다"
             else:
                 label = completion_action_label(
@@ -62,7 +64,7 @@ def get_recent_notifications(after_id: int = 0, limit: int = 20):
                 """
                 SELECT event_id, event_type, resource_id, resource_type, anomaly_type,
                        ec2_utilization_band, selected_action, risk_level,
-                       requires_approval, qa_passed, rollback_count, created_at
+                       requires_approval, qa_passed, rollback_count, rejected, created_at
                 FROM pipeline_events
                 WHERE event_id > %s
                 ORDER BY event_id ASC

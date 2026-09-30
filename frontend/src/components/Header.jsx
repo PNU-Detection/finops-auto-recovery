@@ -126,7 +126,7 @@ export default function Header({ activeTab, onTabChange, pipelineRunning, pendin
             {pipelineRunning ? "RUNNING" : "STOPPED"}
           </span>
         </div>
-        {lastNormalCheckAt && (
+        {!pipelineRunning && lastNormalCheckAt && (
           <div style={{ marginTop: 4, fontFamily: font.mono, fontSize: 11, color: colors.subtext, lineHeight: 1.5 }}>
             <div>비용 정상</div>
             <div>({formatHHMM(lastNormalCheckAt)} 기준)</div>

@@ -1,0 +1,47 @@
+{
+  "scenario_key": "zombie",
+  "resource_id": "i-0c5ff928506156cb3",
+  "resource_type": "EC2",
+  "run_started_at": "2026-09-30T11:43:24.683969+00:00",
+  "run_ended_at": "2026-09-30T11:48:34.856413+00:00",
+  "elapsed_seconds_total": 310.17,
+  "step_timings_ms": {
+    "detection": 9,
+    "classification": 8145,
+    "decision": 22,
+    "action": 682,
+    "qa": 301109
+  },
+  "estimated_cost_usd": 0.021,
+  "anomaly_flag": true,
+  "anomaly_score_zscore": 0.5997,
+  "anomaly_score_iforest": 0.164,
+  "triggered_metrics": [
+    "cpu_utilization",
+    "network_in",
+    "network_out"
+  ],
+  "ec2_utilization_band": "zombie",
+  "anomaly_type": "cost_inefficiency",
+  "selected_action": "Stop",
+  "risk_level": "LOW",
+  "requires_approval": false,
+  "action_result": {
+    "status": "success",
+    "raw": [
+      {
+        "InstanceId": "i-0c5ff928506156cb3",
+        "CurrentState": {
+          "Code": 64,
+          "Name": "stopping"
+        },
+        "PreviousState": {
+          "Code": 16,
+          "Name": "running"
+        }
+      }
+    ]
+  },
+  "qa_passed": true,
+  "rollback_count": 0
+}
