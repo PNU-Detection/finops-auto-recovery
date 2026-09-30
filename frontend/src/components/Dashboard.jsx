@@ -125,7 +125,7 @@ export default function Dashboard({ status, loading, recentDetections, onNavigat
           tooltip="클릭하면 LLM 로그에서 관련 판단 근거를 볼 수 있습니다"
         />
         <StatCard
-          label="조치 실패"
+          label="조치 롤백"
           value={stats.anomaly_failed}
           accent={stats.anomaly_failed > 0 ? "#e0654f" : undefined}
           onClick={onNavigateToFailures}
