@@ -481,6 +481,20 @@ def throttle_lambda_concurrency(
 # ── AutoScaling ScaleDown + WAF Rate Limit ──────────────────────────────────
 
 
+def _find_existing_web_acl(resource_arn: str) -> tuple[str | None, str | None]:
+    """resource_arn(ALB 등)에 이미 연결된 Web ACL이 있으면 (name, id) 반환,
+    없거나 조회 실패하면 (None, None) — 새로 만들도록 폴백."""
+    try:
+        waf = _get_wafv2_client()
+        resp = waf.get_web_acl_for_resource(ResourceArn=resource_arn)
+        web_acl = resp.get("WebACL")
+        if web_acl:
+            return web_acl["Name"], web_acl["Id"]
+    except ClientError as exc:
+        logger.warning("기존 Web ACL 조회 실패, 신규 생성으로 진행: %s", exc)
+    return None, None
+
+
 def scale_down_with_rate_limit(
     auto_scaling_group_name: str,
     target_capacity: int = DEFAULT_ASG_SCALEDOWN_CAPACITY,
@@ -544,10 +558,21 @@ def scale_down_with_rate_limit(
     # 2. WAF Rate-based Rule 적용 (ALB가 있는 경우)
     waf_result = None
     if associated_alb_arn and scaledown_result.get("status") == "success":
+        # [2026-09-30 발견] web_acl_name/id를 안 넘기면 apply_waf_rate_based_rule이
+        # 매번 새 Web ACL을 만들고 ALB에 새로 연결하는데, 이 연결(AssociateWebACL)이
+        # ALB 인식 propagation 지연으로 최대 10회x20초(200초)까지 재시도할 수 있다
+        # (_associate_web_acl_with_retry) — 이게 EDoS 라이브 데모에서 action이
+        # 유독 오래 걸리던 원인. ALB에 이미 연결된 Web ACL이 있으면 그걸 그대로
+        # 재사용해서(이미 연결돼 있으니 재연결 자체를 스킵) 이 대기를 없앤다.
+        existing_web_acl_name, existing_web_acl_id = _find_existing_web_acl(
+            associated_alb_arn
+        )
         waf_result = apply_waf_rate_based_rule(
             resource_arn=associated_alb_arn,
             rule_name=waf_rule_name,
             limit=waf_rate_limit,
+            web_acl_name=existing_web_acl_name,
+            web_acl_id=existing_web_acl_id,
             dry_run=False,  # 부모 함수에서 이미 dry_run 체크함
         )
 

@@ -9,7 +9,7 @@ action_result={"status": "pending_approval"}만 남긴 채 파이프라인이 �
 
 이 노드는 LangGraph의 interrupt()로 그래프 실행 자체를 물리적으로 멈춘다.
 checkpointer가 설정된 그래프에서만 의미가 있으므로, 이 노드는 build_graph()의 기본
-경로(app)에는 들어가지 않고 with_approval_gate=True로 명시했을 때만 그래프에 추가된다. 
+경로(app)에는 들어가지 않고 with_approval_gate=True로 명시했을 때만 그래프에 추가된다.
 이렇게 분리하여 checkpointer 없이 개별 노드/그래프를 직접
 호출하는 기존 playground 테스트들이 영향을 받지 않도록 하기 위함이다.
 
@@ -48,6 +48,12 @@ def approval_gate_node(state: PipelineState) -> PipelineState:
             "decision_reasoning": state.get("decision_reasoning"),
             "candidate_actions": state.get("candidate_actions"),
             "decision_pseudo_code": state.get("decision_pseudo_code"),
+            # EDoS(ScaleDown)는 candidate_actions의 estimated_saving_usd가
+            # cost 지표(desired_capacity 기반) 트렌드로만 계산돼서 공격 중에도
+            # 거의 항상 0으로 나온다 — MaxSize까지 늘어났을 때 회피한 비용
+            # (avoided_cost_usd, decision_node에서 별도 계산)을 승인 화면에서
+            # 폴백으로 쓸 수 있게 같이 넘긴다 (2026-09-30 발견).
+            "avoided_cost_usd": state.get("avoided_cost_usd"),
         }
     )
 
@@ -57,7 +63,7 @@ def approval_gate_node(state: PipelineState) -> PipelineState:
         state["selected_action"] = "NoAction"
         state["requires_approval"] = False
         state["decision_reasoning"] = (
-            (state.get("decision_reasoning") or "") + " [관리자 거부로 NoAction 처리됨]"
-        )
+            state.get("decision_reasoning") or ""
+        ) + " [관리자 거부로 NoAction 처리됨]"
 
     return state

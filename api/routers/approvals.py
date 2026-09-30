@@ -39,6 +39,14 @@ def _to_queue_item(pending: dict) -> dict:
             estimated_saving = candidate.get("estimated_saving_usd", 0.0)
             break
 
+    # ScaleDown(EDoS)은 candidate_actions의 saving이 cost 지표(desired_capacity
+    # 기반) 트렌드로만 계산돼서 공격 중에도 거의 항상 0으로 나온다 — 0이고
+    # avoided_cost_usd(공격을 막지 않았다면 MaxSize까지 늘었을 때의 회피 비용,
+    # decision_node에서 별도 계산)가 있으면 그걸 대신 보여준다(2026-09-30 발견,
+    # 그라파나 "비용 절감액" 총합에는 이미 같은 방식으로 반영돼 있었음).
+    if estimated_saving <= 0 and interrupt.get("avoided_cost_usd"):
+        estimated_saving = interrupt["avoided_cost_usd"]
+
     return {
         "id": pending["thread_id"],
         "severity": interrupt.get("risk_level"),
